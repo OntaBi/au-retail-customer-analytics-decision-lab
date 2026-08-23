@@ -8,11 +8,9 @@ The project connects **customer behaviour → purchase cadence → behavioural l
 
 ## Live Demo
 
-🚀 **Live Streamlit application deployed via Streamlit Community Cloud**
+🚀 **[Launch the AU Retail Customer Analytics Decision Lab](https://au-retail-customer-analytics-lab.streamlit.app/)**
 
 Explore Executive Overview, Customer Health, Customer Segments, Customer Explorer and Decision Queue interactively.
-
-> Add the public Streamlit application URL here after copying it from the deployed app.
 
 ## Executive Summary
 
