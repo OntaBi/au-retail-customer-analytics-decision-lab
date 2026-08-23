@@ -8,9 +8,11 @@ The project connects **customer behaviour → purchase cadence → behavioural l
 
 ## Live Demo
 
-🚀 **Live Streamlit demo coming soon**
+🚀 **Live Streamlit application deployed via Streamlit Community Cloud**
 
 Explore Executive Overview, Customer Health, Customer Segments, Customer Explorer and Decision Queue interactively.
+
+> Add the public Streamlit application URL here after copying it from the deployed app.
 
 ## Executive Summary
 
@@ -323,7 +325,10 @@ au-retail-customer-analytics-decision-lab/
 │   └── 5_Decision_Queue.py
 ├── data/
 │   ├── generated/
+│   │   └── transactions.parquet
 │   ├── runtime/
+│   │   ├── customer_priority.parquet
+│   │   └── customer_clusters.parquet
 │   └── sample/
 ├── docs/
 │   └── images/
@@ -342,10 +347,23 @@ au-retail-customer-analytics-decision-lab/
 │   └── qa/
 ├── tests/
 ├── build_all.py
+├── requirements.txt
 └── pytest.ini
 ```
 
-Generated datasets and runtime outputs are excluded from Git where appropriate.
+Most generated datasets and intermediate runtime outputs are excluded from Git. Three curated Parquet datasets are versioned specifically to support the deployed Streamlit application.
+
+## Deployment Data
+
+The repository includes three curated Parquet datasets required by the deployed Streamlit application:
+
+- `data/generated/transactions.parquet`
+- `data/runtime/customer_priority.parquet`
+- `data/runtime/customer_clusters.parquet`
+
+Other generated and intermediate analytical outputs remain excluded from version control. Separating deployment assets from intermediate pipeline outputs keeps the repository focused while allowing the live application to start quickly and provide a consistent demonstration experience.
+
+The application is deployed using **Python 3.11** on **Streamlit Community Cloud**, with runtime dependencies managed through `requirements.txt`.
 
 ## Testing and Portfolio QA
 
@@ -438,7 +456,7 @@ Production-oriented extensions could include survival analysis or probabilistic 
 
 **Decision Analytics:** customer health assessment, behavioural risk prioritisation, commercial value integration, explainable customer decision groups, retention and re-engagement logic, customer-level investigation, CRM activation queues and operational prioritisation.
 
-**Analytics Engineering:** modular Python development, parquet-based analytical datasets, reproducible build pipeline, automated testing, Streamlit application development, reusable filters, CSV activation outputs, Git-ready project organisation and technical documentation.
+**Analytics Engineering:** modular Python development, parquet-based analytical datasets, reproducible build pipeline, automated testing, Streamlit application development, Streamlit Community Cloud deployment, reusable filters, CSV activation outputs, Git-ready project organisation and technical documentation.
 
 ## Project Perspective
 
