@@ -56,6 +56,18 @@ pages = [
         / "5_Decision_Queue.py",
         title="Decision Queue",
     ),
+    st.Page(
+        APP_ROOT
+        / "app_pages"
+        / "6_Customer_Growth_Value.py",
+        title="Customer Growth & Value",
+    ),
+    st.Page(
+        APP_ROOT
+        / "app_pages"
+        / "7_Next_Best_Action.py",
+        title="Next Best Action",
+    ),
 ]
 
 

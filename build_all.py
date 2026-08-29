@@ -50,6 +50,14 @@ BUILD_STEPS = [
         "Build customer priority decisions",
         "src.decision_engine.customer_priority",
     ),
+    PipelineStep(
+        "Build customer growth, cohort and LTV analytics",
+        "src.customer.customer_growth_value",
+    ),
+    PipelineStep(
+        "Build Next Best Action recommendations",
+        "src.decision_engine.next_best_action",
+    ),
 ]
 
 
@@ -269,6 +277,11 @@ def main() -> None:
         "data/runtime/clustering_features.parquet",
         "data/runtime/customer_clusters.parquet",
         "data/runtime/customer_priority.parquet",
+        "data/runtime/customer_ltv.parquet",
+        "data/runtime/cohort_retention.parquet",
+        "data/runtime/cohort_summary.parquet",
+        "data/runtime/customer_growth_monthly.parquet",
+        "data/runtime/customer_next_best_action.parquet",
     ]
 
     for output in outputs:

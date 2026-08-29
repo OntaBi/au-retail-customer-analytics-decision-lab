@@ -10,7 +10,7 @@ The project connects **customer behaviour → purchase cadence → behavioural l
 
 🚀 **[Launch the AU Retail Customer Analytics Decision Lab](https://au-retail-customer-analytics-lab.streamlit.app/)**
 
-Explore Executive Overview, Customer Health, Customer Segments, Customer Explorer and Decision Queue interactively.
+Explore all seven connected views, from Executive Overview and Customer Health through Customer Growth & Value and Next Best Action.
 
 ## Executive Summary
 
@@ -106,9 +106,27 @@ The central design principle is:
 
 </details>
 
+<details>
+<summary><strong>Customer Growth & Value</strong> — How are acquisition, retention, cohort health and customer value evolving over time?</summary>
+
+<br>
+
+![Customer Growth & Value](docs/images/06_customer_growth_value.png)
+
+</details>
+
+<details>
+<summary><strong>Next Best Action</strong> — Which customers should receive an intervention, which action creates value, and when should the business deliberately do nothing?</summary>
+
+<br>
+
+![Next Best Action](docs/images/07_next_best_action.png)
+
+</details>
+
 ## Interactive Decision Lab
 
-The Streamlit application exposes five connected analytical views.
+The Streamlit application exposes seven connected analytical views.
 
 ### 1. Executive Overview
 
@@ -186,6 +204,47 @@ The full filtered decision queue can be downloaded as a CSV for CRM activation.
 
 The queue is intended to support prioritisation and human review rather than automatically contacting customers without business oversight.
 
+### 6. Customer Growth & Value
+
+**Question:** How are customer acquisition, repeat behaviour, cohort retention and customer value evolving over time?
+
+This page adds a longitudinal portfolio view. Monthly customer movement separates new customers, reactivations and newly lapsed customers, while opening and closing behaviourally active populations reconcile from month to month.
+
+Acquisition cohorts are tracked by months since first purchase. The retention heatmap focuses on the most recent 12 acquisition cohorts for readability, while maturity-aware metrics prevent recent cohorts from being compared against observation windows they have not yet completed.
+
+Fixed-window customer value is measured at M3, M6, M12, M18 and M24 only when the full observation window is available. This avoids distorting value simply because one customer has been observed for longer than another.
+
+The page also includes a maturity-safe customer value funnel:
+
+```text
+12M Mature Customers
+        ↓
+Meaningfully Engaged
+        ↓
+Retained at M6+
+        ↓
+Retained at M12+
+        ↓
+High-Value Customers
+```
+
+Meaningful engagement is defined as at least three orders within the first 12 months. Executive signals highlight retention pressure, cohort value development and recent customer growth.
+
+### 7. Next Best Action
+
+**Question:** Which customers should the business act on, what action should it take, and does intervention create enough expected value to justify it?
+
+Next Best Action converts behavioural, lifecycle and commercial signals into a transparent customer-level recommendation engine.
+
+Candidate actions are **Protect, Re-engage, Develop, Cross-sell, Promote and Do Nothing**.
+
+Actions are gated by customer eligibility and relevance, including customer value, lifecycle state, behavioural lapse and momentum risk, category opportunity and promotion responsiveness. The engine then estimates response probability, expected incremental sales and expected incremental margin.
+
+An intervention is recommended only when the customer is eligible, the action is relevant and expected incremental economics are positive. **Do Nothing is therefore an explicit commercial decision, not a missing recommendation.**
+
+The page provides portfolio opportunity metrics, action mix, expected incremental margin by action, a behavioural-risk versus commercial-value recommendation map, a prioritised intervention queue and a customer-level recommendation explorer. The filtered intervention population can be exported as a CRM-ready queue.
+
+
 ## Why Customer-Specific Cadence Matters
 
 Traditional churn definitions often use a fixed inactivity rule such as "no purchase in the last 90 days" or "no purchase in the last 12 months."
@@ -262,21 +321,35 @@ The final number of clusters was selected using statistical diagnostics together
 
 ## Customer Decision Engine
 
-The decision engine combines:
+The project uses two connected layers of decisioning.
 
-- customer value
-- lapse risk
-- momentum risk
-- lifecycle context
-- cadence confidence
-- behavioural evidence
-- commercial priority
+The first combines customer value, lapse risk, momentum risk, lifecycle context, cadence confidence and behavioural evidence into an explainable priority score and customer decision group. This establishes **who requires attention and why**.
 
-These signals are translated into a priority score and an explainable customer decision group.
+The second is the Next Best Action engine. Candidate treatments are gated by customer context and commercial relevance, then evaluated using response probability and expected incremental economics.
 
-The objective is not to predict a binary churn label and automatically trigger an offer.
+The design deliberately avoids machine learning for its own sake. A recommendation must terminate in a commercial decision.
 
-It is to identify **who requires attention, why they require attention and what type of commercial response is appropriate**.
+```text
+Customer Behaviour + Lifecycle + Value
+                ↓
+        Decision Eligibility
+                ↓
+        Candidate Actions
+                ↓
+      Relevance / Context Gates
+                ↓
+      Response Probability
+                ↓
+Expected Incremental Sales & Margin
+                ↓
+ Positive Commercial Hurdle?
+        ↙               ↘
+      Yes                No
+       ↓                  ↓
+Intervention         Do Nothing
+```
+
+This makes the recommendation logic inspectable and gives analysts a clear reason for both intervention and non-intervention decisions.
 
 ## CRM Activation
 
@@ -320,25 +393,24 @@ au-retail-customer-analytics-decision-lab/
 │   ├── 2_Customer_Health.py
 │   ├── 3_Customer_Segments.py
 │   ├── 4_Customer_Explorer.py
-│   └── 5_Decision_Queue.py
+│   ├── 5_Decision_Queue.py
+│   ├── 6_Customer_Growth_Value.py
+│   └── 7_Next_Best_Action.py
 ├── data/
 │   ├── generated/
-│   │   └── transactions.parquet
-│   ├── runtime/
-│   │   ├── customer_priority.parquet
-│   │   └── customer_clusters.parquet
-│   └── sample/
+│   └── runtime/
 ├── docs/
 │   └── images/
 │       ├── 01_executive_overview.png
 │       ├── 02_customer_health.png
 │       ├── 03_customer_segments.png
 │       ├── 04_customer_explorer.png
-│       └── 05_decision_queue.png
-├── notebooks/
-├── outputs/
+│       ├── 05_decision_queue.png
+│       ├── 06_customer_growth_value.png
+│       └── 07_next_best_action.png
 ├── src/
 │   ├── app/
+│   ├── customer/
 │   ├── data_generation/
 │   ├── decision_engine/
 │   ├── modelling/
@@ -349,41 +421,42 @@ au-retail-customer-analytics-decision-lab/
 └── pytest.ini
 ```
 
-Most generated datasets and intermediate runtime outputs are excluded from Git. Three curated Parquet datasets are versioned specifically to support the deployed Streamlit application.
+Generated analytical outputs are separated from application code so the pipeline can be rebuilt and validated independently of the Streamlit presentation layer.
 
 ## Deployment Data
 
-The repository includes three curated Parquet datasets required by the deployed Streamlit application:
+The deployed application uses curated generated and runtime Parquet assets required by the seven analytical pages, including transaction, customer decision, cohort/value and Next Best Action outputs.
 
-- `data/generated/transactions.parquet`
-- `data/runtime/customer_priority.parquet`
-- `data/runtime/customer_clusters.parquet`
-
-Other generated and intermediate analytical outputs remain excluded from version control. Separating deployment assets from intermediate pipeline outputs keeps the repository focused while allowing the live application to start quickly and provide a consistent demonstration experience.
+Intermediate analytical outputs can remain excluded from version control where they are not required for deployment. Separating deployment assets from rebuildable pipeline outputs keeps the repository focused while allowing the live application to start quickly and provide a consistent demonstration experience.
 
 The application is deployed using **Python 3.11** on **Streamlit Community Cloud**, with runtime dependencies managed through `requirements.txt`.
 
 ## Testing and Portfolio QA
 
-The project includes automated tests covering the core customer analytics and decision logic.
+The project includes automated tests covering the core customer analytics, cohort/value calculations and decision logic.
 
 Current test suite:
 
 ```text
-9 passed
+19 passed
 ```
 
-The test suite covers core customer analytical logic together with final runtime-output integrity.
+The suite validates, among other controls:
 
-Final output QA verifies that:
+- one final priority and Next Best Action record per customer
+- unique customer IDs in customer-level decision outputs
+- customer sales and margin reconciliation back to transaction history
+- fixed-window LTV maturity and suppression of immature value windows
+- 100% M0 purchasing activity for acquisition cohorts
+- monthly customer movement reconciliation
+- cohort maturity controls for retention and value measures
+- approved Next Best Action taxonomy
+- valid confidence and response-probability bounds
+- positive expected incremental economics for recommended interventions
+- zero incremental economics for Do Nothing
+- populated recommendation drivers, alternatives and rationale for explainability
 
-- the customer priority dataset contains exactly one record for each of the **20,000 customers**
-- customer IDs are unique in the final decision output
-- clustering outputs use the expected six cluster IDs and approved commercial segment names
-- customer value, lapse risk, momentum risk and priority scores remain within valid `0–100` bounds
-- final customer decision groups belong to the approved decision framework
-
-The application has also been manually validated across all five pages, including shared filters, individual customer exploration, decision controls and CSV export behaviour.
+The application has also been manually validated across all seven pages, including shared filters, cohort visualisation, customer exploration, recommendation controls and CSV export behaviour.
 
 ## Reproducibility
 
@@ -413,15 +486,17 @@ streamlit run app.py
 
 ## Methodology
 
-The customer decision framework follows seven broad stages:
+The customer decision framework follows nine broad stages:
 
 1. **Transaction foundation** — Synthetic customer transactions capture purchase timing, channel, category, units, sales, margin and promotional behaviour.
 2. **Customer behaviour features** — Transaction history is transformed into customer-level behavioural, commercial, channel, category and cadence features.
-3. **Cadence and lapse** — Customer-specific expected purchase cadence is estimated and compared with current inactivity to identify unusual lapse behaviour.
-4. **Longitudinal momentum** — Recent purchase intervals are compared with historical behaviour to identify customers whose cadence is deteriorating.
+3. **Cadence and lapse** — Customer-specific expected purchase cadence is compared with current inactivity to identify unusual lapse behaviour.
+4. **Longitudinal momentum** — Recent purchase intervals are compared with historical behaviour to identify deterioration.
 5. **Customer value** — Commercial contribution is translated into customer value scores and tiers.
-6. **Behavioural segmentation** — Standardised behavioural features are clustered using K-Means and translated into commercially interpretable customer segments.
-7. **Decision engine** — Value, lapse, momentum and customer context are combined into priority scores, decision groups, recommended actions and CRM-ready outputs.
+6. **Behavioural segmentation** — Standardised behavioural features are clustered using K-Means and translated into commercially interpretable segments.
+7. **Cohort and fixed-window value** — Acquisition cohorts, customer movement and maturity-aware M3/M6/M12/M18/M24 value measures provide a longitudinal view.
+8. **Priority decisioning** — Value, lapse, momentum and customer context are combined into priority scores and explainable decision groups.
+9. **Next Best Action** — Candidate interventions are gated by relevance and context, evaluated on expected response and incremental economics, and either recommended or resolved to Do Nothing.
 
 ## Limitations
 
@@ -434,11 +509,11 @@ This is a portfolio customer decision-analytics prototype rather than a producti
 - customer cadence is inferred only from observed transaction history
 - sparse-history customers have inherently lower cadence confidence
 - behavioural lapse is not equivalent to confirmed churn
-- no causal estimate of whether an intervention will retain a customer
-- no offer optimisation or next-best-action model
-- no customer lifetime value forecast
-- no marketing-contact history or channel-response model
-- no product-level recommendation engine
+- no causal uplift estimate of whether an intervention will retain or incrementally change customer behaviour
+- response probabilities and incremental economics are synthetic analytical assumptions rather than experimentally calibrated causal estimates
+- no marketing-contact history, treatment-fatigue or contact-policy optimisation
+- no SKU-level product recommendation engine
+- fixed-window LTV is observed/maturity-aware value rather than a probabilistic lifetime forecast
 - K-Means assumes a fixed partition of behavioural space
 - PCA is used for cluster visualisation rather than model fitting
 - priority scores and decision thresholds are analytical guardrails rather than production-calibrated policies
@@ -446,13 +521,13 @@ This is a portfolio customer decision-analytics prototype rather than a producti
 
 ## Potential Next Steps
 
-Production-oriented extensions could include survival analysis or probabilistic time-to-next-purchase modelling, customer lifetime value forecasting, next-best-action modelling, offer-response propensity, uplift modelling, campaign experimentation, contact-policy optimisation, loyalty behaviour, product affinity and recommendation modelling, sequence-based customer embeddings, more advanced clustering approaches, dynamic segment migration, real-time event triggers, CRM integration, model monitoring and realised-retention measurement.
+Production-oriented extensions could include survival analysis or probabilistic time-to-next-purchase modelling, probabilistic lifetime value forecasting, experimentally calibrated offer-response and uplift modelling, campaign experimentation, contact-policy optimisation, loyalty behaviour, SKU-level product affinity and recommendation modelling, sequence-based customer embeddings, dynamic segment migration, real-time event triggers, live CRM integration, recommendation monitoring and realised incremental-value measurement.
 
 ## Skills Demonstrated
 
-**Analytics & Data Science:** business problem framing, synthetic data design, customer feature engineering, purchase-cadence analysis, behavioural lapse logic, longitudinal trend analysis, K-Means clustering, PCA visualisation, customer value scoring and analytical validation.
+**Analytics & Data Science:** business problem framing, synthetic data design, customer feature engineering, purchase-cadence analysis, behavioural lapse logic, longitudinal trend analysis, K-Means clustering, PCA visualisation, customer value scoring, acquisition cohort analysis, retention measurement, maturity-aware fixed-window LTV and analytical validation.
 
-**Decision Analytics:** customer health assessment, behavioural risk prioritisation, commercial value integration, explainable customer decision groups, retention and re-engagement logic, customer-level investigation, CRM activation queues and operational prioritisation.
+**Decision Analytics:** customer health assessment, behavioural risk prioritisation, commercial value integration, explainable customer decision groups, retention and re-engagement logic, customer-level investigation, CRM activation queues, Next Best Action design, positive-economics intervention gating, explicit Do Nothing decisions, recommendation explainability and operational prioritisation.
 
 **Analytics Engineering:** modular Python development, parquet-based analytical datasets, reproducible build pipeline, automated testing, Streamlit application development, Streamlit Community Cloud deployment, reusable filters, CSV activation outputs, Git-ready project organisation and technical documentation.
 
