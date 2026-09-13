@@ -29,12 +29,9 @@ CLUSTER_FILE = (
     / "customer_clusters.parquet"
 )
 
-TRANSACTION_FILE = (
-    APP_ROOT
-    / "data"
-    / "generated"
-    / "transactions.parquet"
-)
+TRANSACTION_FILE = (APP_ROOT / "data" / "runtime" / "golden_customer_transactions.parquet")
+IDENTITY_RESOLUTION_FILE = (APP_ROOT / "data" / "runtime" / "customer_identity_resolution.parquet")
+IDENTITY_SOURCE_FILE = (APP_ROOT / "data" / "generated" / "customer_identity_records.parquet")
 
 
 # =========================================================
@@ -52,12 +49,12 @@ def load_data():
         CLUSTER_FILE
     )
 
-    transactions = pd.read_parquet(
-        TRANSACTION_FILE
-    )
+    transactions = pd.read_parquet(TRANSACTION_FILE)
+    identity_resolution = pd.read_parquet(IDENTITY_RESOLUTION_FILE)
+    identity_source = pd.read_parquet(IDENTITY_SOURCE_FILE)
 
     cluster_columns = [
-        "customer_id",
+        "golden_customer_id",
         "cluster",
         "cluster_name",
         "orders",
@@ -87,7 +84,7 @@ def load_data():
 
     customers = priority.merge(
         cluster_lookup,
-        on="customer_id",
+        on="golden_customer_id",
         how="left",
         validate="one_to_one",
         suffixes=(
@@ -101,10 +98,18 @@ def load_data():
         .fillna("Not Yet Clustered")
     )
 
-    return customers, transactions
+    identity_lookup = identity_resolution.merge(
+        identity_source,
+        on="identity_record_id",
+        how="left",
+        validate="one_to_one",
+        suffixes=("", "_source"),
+    )
+
+    return customers, transactions, identity_lookup
 
 
-customers, transactions = load_data()
+customers, transactions, identity_lookup = load_data()
 
 
 # =========================================================
@@ -126,7 +131,7 @@ st.title(
 
 st.caption(
     "Synthetic Australian retail customer scenario | "
-    "20,000 customers | Behaviour → Cadence → Value → Decision"
+    "Resolved Golden Customers | Behaviour → Cadence → Value → Decision"
 )
 
 st.header(
@@ -157,12 +162,12 @@ if filtered_customers.empty:
 # =========================================================
 
 st.subheader(
-    "Select customer"
+    "Select Golden Customer"
 )
 
 customer_options = (
     filtered_customers[
-        "customer_id"
+        "golden_customer_id"
     ]
     .sort_values()
     .tolist()
@@ -183,7 +188,7 @@ priority_candidates = (
         "priority_score",
         ascending=False,
     )[
-        "customer_id"
+        "golden_customer_id"
     ]
     .tolist()
 )
@@ -207,8 +212,8 @@ selector_col, search_col = st.columns(
 with search_col:
 
     search_text = st.text_input(
-        "Search Customer ID",
-        placeholder="e.g. CUST001234",
+        "Search Golden Customer ID",
+        placeholder="e.g. GOLDEN_001234",
     )
 
 if search_text:
@@ -249,20 +254,20 @@ with selector_col:
         )
 
     selected_customer = st.selectbox(
-        "Customer",
+        "Golden Customer",
         options=matching_customers,
         index=selector_index,
     )
 
 
 customer = filtered_customers.loc[
-    filtered_customers["customer_id"]
+    filtered_customers["golden_customer_id"]
     == selected_customer
 ].iloc[0]
 
 customer_transactions = (
     transactions.loc[
-        transactions["customer_id"]
+        transactions["golden_customer_id"]
         == selected_customer
     ]
     .sort_values(
@@ -344,6 +349,105 @@ with action_col:
             "recommended_action"
         ]
     )
+
+
+# =========================================================
+# IDENTITY & DATA CONFIDENCE
+# =========================================================
+st.subheader("Identity & data confidence")
+
+customer_identity_records = identity_lookup.loc[
+    identity_lookup["golden_customer_id"] == selected_customer
+].copy()
+
+if customer_identity_records.empty:
+    st.info(
+        "No source identity records are linked to this Golden Customer."
+    )
+else:
+    source_records_linked = len(customer_identity_records)
+    source_systems = (
+        customer_identity_records["source_system"]
+        .dropna()
+        .nunique()
+    )
+    best_match_row = (
+        customer_identity_records
+        .sort_values("match_confidence", ascending=False)
+        .iloc[0]
+    )
+    minimum_confidence = (
+        customer_identity_records["match_confidence"].min()
+    )
+    resolution_status = (
+        "Resolved Multi-Record"
+        if source_records_linked > 1
+        else "Standalone"
+    )
+
+    id1, id2, id3, id4, id5 = st.columns(5)
+    with id1:
+        st.markdown("**Golden Customer ID**")
+        st.write(selected_customer)
+    id2.metric("Source Records Linked", f"{source_records_linked:,.0f}")
+    id3.metric("Source Systems", f"{source_systems:,.0f}")
+    id4.metric("Minimum Match Confidence", f"{minimum_confidence:.1%}")
+    with id5:
+        st.markdown("**Resolution Status**")
+        st.write(resolution_status)
+
+    st.caption(
+        f"Strongest recorded match method: {best_match_row['match_method']}. "
+        "Identity evidence is shown from observable source records only; hidden synthetic "
+        "ground truth is reserved for QA and is not used by the application."
+    )
+
+    identity_display_columns = [
+        column
+        for column in [
+            "identity_record_id",
+            "source_system",
+            "source_role",
+            "match_method",
+            "match_confidence",
+            "ambiguous_match_flag",
+        ]
+        if column in customer_identity_records.columns
+    ]
+
+    if identity_display_columns:
+        identity_display = (
+            customer_identity_records[identity_display_columns]
+            .sort_values(
+                ["source_system", "identity_record_id"],
+                na_position="last",
+            )
+            .copy()
+        )
+
+        if "match_confidence" in identity_display.columns:
+            identity_display["match_confidence"] = (
+                identity_display["match_confidence"]
+                .map(lambda x: f"{x:.1%}" if pd.notna(x) else "")
+            )
+
+        identity_display = identity_display.rename(
+            columns={
+                "identity_record_id": "Source Identity Record",
+                "source_system": "Source System",
+                "source_role": "Source Role",
+                "match_method": "Match Method",
+                "match_confidence": "Match Confidence",
+                "ambiguous_match_flag": "Ambiguous Match",
+            }
+        )
+
+        with st.expander("View linked source identity records"):
+            st.dataframe(
+                identity_display,
+                hide_index=True,
+                use_container_width=True,
+            )
 
 
 # =========================================================
@@ -1193,11 +1297,11 @@ else:
 # =========================================================
 
 st.subheader(
-    "Customer record export"
+    "Golden Customer record export"
 )
 
 export_columns = [
-    "customer_id",
+    "golden_customer_id",
     "cluster_name",
     "customer_value_tier",
     "lifecycle_status",
@@ -1214,7 +1318,7 @@ export_columns = [
 
 customer_export = (
     customers.loc[
-        customers["customer_id"]
+        customers["golden_customer_id"]
         == selected_customer,
         export_columns,
     ]
@@ -1243,10 +1347,10 @@ customer_export = (
 )
 
 st.download_button(
-    label="Download Customer Record",
+    label="Download Golden Customer Record",
     data=customer_export,
     file_name=(
-        f"{selected_customer}_customer_record.csv"
+        f"{selected_customer}_golden_customer_record.csv"
     ),
     mime="text/csv",
 )
@@ -1259,9 +1363,9 @@ st.download_button(
 st.divider()
 
 st.caption(
-    "Customer Explorer combines commercial value, behavioural "
+    "Customer Explorer combines identity evidence, commercial value, behavioural "
     "segmentation, purchase cadence and decision-engine outputs "
-    "for an individual customer. Behavioural lapse is assessed "
+    "for an individual Golden Customer. Behavioural lapse is assessed "
     "relative to the customer's own observed purchasing pattern "
     "rather than a universal inactivity threshold."
 )

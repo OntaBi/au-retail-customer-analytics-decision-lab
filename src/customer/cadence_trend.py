@@ -10,11 +10,11 @@ from scipy.stats import linregress
 # ---------------------------------------------------------------------
 
 TRANSACTION_FILE = Path(
-    "data/generated/transactions.parquet"
+    "data/runtime/golden_customer_transactions.parquet"
 )
 
 CUSTOMER_FILE = Path(
-    "data/generated/customer_master.parquet"
+    "data/runtime/golden_customer_master.parquet"
 )
 
 OUTPUT_FILE = Path(
@@ -35,14 +35,14 @@ def build_purchase_gap_history(
     purchase_dates = (
         transactions[
             [
-                "customer_id",
+                "golden_customer_id",
                 "transaction_date",
             ]
         ]
         .drop_duplicates()
         .sort_values(
             [
-                "customer_id",
+                "golden_customer_id",
                 "transaction_date",
             ]
         )
@@ -51,7 +51,7 @@ def build_purchase_gap_history(
 
     purchase_dates["previous_purchase_date"] = (
         purchase_dates
-        .groupby("customer_id")[
+        .groupby("golden_customer_id")[
             "transaction_date"
         ]
         .shift(1)
@@ -68,7 +68,7 @@ def build_purchase_gap_history(
 
     gaps["gap_sequence"] = (
         gaps
-        .groupby("customer_id")
+        .groupby("golden_customer_id")
         .cumcount()
         + 1
     )
@@ -172,7 +172,7 @@ def build_customer_trends(
     trends = (
         gaps
         .groupby(
-            "customer_id",
+            "golden_customer_id",
             group_keys=False,
         )
         .apply(
@@ -255,12 +255,11 @@ def build_output(
 
     output = customers[
         [
-            "customer_id",
-            "acquisition_date",
+            "golden_customer_id",
         ]
     ].merge(
         trends,
-        on="customer_id",
+        on="golden_customer_id",
         how="left",
         validate="one_to_one",
     )
@@ -299,7 +298,7 @@ def run_qa(
     print("=" * 75)
 
     print(
-        f"Customers: "
+        f"Resolved golden customers: "
         f"{len(trends):,}"
     )
 

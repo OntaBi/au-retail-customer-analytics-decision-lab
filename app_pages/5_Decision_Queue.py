@@ -47,7 +47,7 @@ def load_data():
 
     cluster_lookup = clusters[
         [
-            "customer_id",
+            "golden_customer_id",
             "cluster",
             "cluster_name",
         ]
@@ -55,7 +55,7 @@ def load_data():
 
     data = priority.merge(
         cluster_lookup,
-        on="customer_id",
+        on="golden_customer_id",
         how="left",
         validate="one_to_one",
     )
@@ -85,7 +85,7 @@ st.title(
 
 st.caption(
     "Synthetic Australian retail customer scenario | "
-    "20,000 customers | Behaviour → Cadence → Value → Decision"
+    "Resolved Golden Customers | Behaviour → Cadence → Value → Decision"
 )
 
 st.header(
@@ -229,7 +229,7 @@ queue = filtered.loc[
 
 queue_customers = (
     queue[
-        "customer_id"
+        "golden_customer_id"
     ]
     .nunique()
 )
@@ -492,7 +492,7 @@ else:
         y="value_score",
         size="trailing_12m_margin",
         color="decision_group",
-        hover_name="customer_id",
+        hover_name="golden_customer_id",
         hover_data={
             "cluster_name": True,
             "customer_value_tier": True,
@@ -569,7 +569,7 @@ action_summary = (
     )
     .agg(
         customers=(
-            "customer_id",
+            "golden_customer_id",
             "nunique",
         ),
         trailing_12m_sales=(
@@ -707,7 +707,7 @@ priority_queue = (
     )
     [
         [
-            "customer_id",
+            "golden_customer_id",
             "cluster_name",
             "customer_value_tier",
             "lifecycle_status",
@@ -833,7 +833,7 @@ else:
     priority_queue = (
         priority_queue.rename(
             columns={
-                "customer_id":
+                "golden_customer_id":
                     "Customer",
                 "cluster_name":
                     "Customer Segment",
@@ -906,7 +906,7 @@ else:
         )
         [
             [
-                "customer_id",
+                "golden_customer_id",
                 "cluster_name",
                 "customer_value_tier",
                 "lifecycle_status",

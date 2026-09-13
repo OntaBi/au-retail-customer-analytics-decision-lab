@@ -21,12 +21,9 @@ PRIORITY_FILE = (
     / "customer_priority.parquet"
 )
 
-CLUSTER_FILE = (
-    APP_ROOT
-    / "data"
-    / "runtime"
-    / "customer_clusters.parquet"
-)
+CLUSTER_FILE = (APP_ROOT / "data" / "runtime" / "customer_clusters.parquet")
+IDENTITY_RESOLUTION_FILE = (APP_ROOT / "data" / "runtime" / "customer_identity_resolution.parquet")
+IDENTITY_SUMMARY_FILE = (APP_ROOT / "data" / "runtime" / "identity_resolution_summary.parquet")
 
 
 # =========================================================
@@ -45,7 +42,7 @@ def load_data():
 
     cluster_lookup = clusters[
         [
-            "customer_id",
+            "golden_customer_id",
             "cluster",
             "cluster_name",
         ]
@@ -53,15 +50,17 @@ def load_data():
 
     data = priority.merge(
         cluster_lookup,
-        on="customer_id",
+        on="golden_customer_id",
         how="left",
         validate="one_to_one",
     )
 
-    return data
+    identity_resolution = pd.read_parquet(IDENTITY_RESOLUTION_FILE)
+    identity_summary = pd.read_parquet(IDENTITY_SUMMARY_FILE)
+    return data, identity_resolution, identity_summary
 
 
-df = load_data()
+df, identity_resolution, identity_summary = load_data()
 
 df["cluster_name"] = (
     df["cluster_name"]
@@ -93,7 +92,7 @@ st.caption(
 
 total_customers = (
     filtered[
-        "customer_id"
+        "golden_customer_id"
     ]
     .nunique()
 )
@@ -181,7 +180,7 @@ kpi1, kpi2, kpi3, kpi4, kpi5 = (
 
 with kpi1:
     st.metric(
-        "Customers",
+        "Golden Customers",
         f"{total_customers:,.0f}",
     )
 
@@ -213,6 +212,42 @@ with kpi5:
     )
 
 
+st.markdown("---")
+
+
+# =========================================================
+# CUSTOMER IDENTITY QUALITY
+# =========================================================
+st.subheader("Customer Identity Quality")
+
+identity_metrics = dict(zip(identity_summary["metric"], identity_summary["value"]))
+source_identities = int(identity_metrics.get("source_identity_records", len(identity_resolution)))
+resolved_identities = int(identity_metrics.get("predicted_golden_customers", identity_resolution["golden_customer_id"].nunique()))
+precision = float(identity_metrics.get("precision", 0))
+recall = float(identity_metrics.get("recall", 0))
+false_merge_rate = float(identity_metrics.get("false_merge_rate", 0))
+
+id1, id2, id3, id4, id5 = st.columns(5)
+id1.metric("Source Identity Records", f"{source_identities:,.0f}")
+id2.metric("Resolved Golden Identities", f"{resolved_identities:,.0f}")
+id3.metric("Resolution Precision", f"{precision:.1%}")
+id4.metric("Resolution Recall", f"{recall:.1%}")
+id5.metric("False Merge Rate", f"{false_merge_rate:.1%}")
+
+st.info(
+    "Identity resolution consolidates fragmented source records into Golden Customers "
+    "using strong deterministic and corroborated probabilistic evidence. Ambiguous links "
+    "are conservatively rejected rather than forcing uncertain identities together."
+)
+st.caption(
+    "Quality metrics are measured against hidden ground truth in the synthetic test "
+    "environment. Downstream behavioural analytics operate on the resolved Golden "
+    "Customer layer."
+)
+st.caption(
+    "Identity quality metrics are enterprise-wide and are not affected by the customer "
+    "filters above."
+)
 st.markdown("---")
 
 
@@ -388,7 +423,7 @@ commercial = (
     )
     .agg(
         customers=(
-            "customer_id",
+            "golden_customer_id",
             "nunique",
         ),
         trailing_12m_sales=(
@@ -473,7 +508,7 @@ segments = (
     )
     .agg(
         customers=(
-            "customer_id",
+            "golden_customer_id",
             "nunique",
         ),
         trailing_12m_sales=(

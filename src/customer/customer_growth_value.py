@@ -6,8 +6,8 @@ import pandas as pd
 
 AS_OF_DATE = pd.Timestamp("2026-07-31")
 
-CUSTOMER_MASTER_FILE = Path("data/generated/customer_master.parquet")
-TRANSACTION_FILE = Path("data/generated/transactions.parquet")
+CUSTOMER_MASTER_FILE = Path("data/runtime/golden_customer_master.parquet")
+TRANSACTION_FILE = Path("data/runtime/golden_customer_transactions.parquet")
 CUSTOMER_VALUE_FILE = Path("data/runtime/customer_value.parquet")
 
 OUTPUT_DIR = Path("data/runtime")
@@ -43,11 +43,11 @@ def build_customer_ltv(
     customer_value: pd.DataFrame,
 ) -> pd.DataFrame:
     ordered_transactions = transactions.sort_values(
-        ["customer_id", "transaction_date", "order_id"]
+        ["golden_customer_id", "transaction_date", "order_id"]
     ).copy()
 
     base = (
-        ordered_transactions.groupby("customer_id")
+        ordered_transactions.groupby("golden_customer_id")
         .agg(
             first_purchase_date=("transaction_date", "min"),
             last_purchase_date=("transaction_date", "max"),
@@ -61,40 +61,40 @@ def build_customer_ltv(
 
     purchase_sequence = (
         ordered_transactions[
-            ["customer_id", "transaction_date", "order_id"]
+            ["golden_customer_id", "transaction_date", "order_id"]
         ]
         .drop_duplicates()
-        .sort_values(["customer_id", "transaction_date", "order_id"])
+        .sort_values(["golden_customer_id", "transaction_date", "order_id"])
         .copy()
     )
 
     purchase_sequence["purchase_number"] = (
-        purchase_sequence.groupby("customer_id").cumcount() + 1
+        purchase_sequence.groupby("golden_customer_id").cumcount() + 1
     )
 
     second_purchase = (
         purchase_sequence.loc[
             purchase_sequence["purchase_number"].eq(2),
-            ["customer_id", "transaction_date"],
+            ["golden_customer_id", "transaction_date"],
         ]
         .rename(columns={"transaction_date": "second_purchase_date"})
     )
 
     customer_ltv = (
         customer_master[
-            ["customer_id", "state", "acquisition_date"]
+            ["golden_customer_id", "state"]
         ]
-        .merge(base, on="customer_id", how="left", validate="one_to_one")
+        .merge(base, on="golden_customer_id", how="left", validate="one_to_one")
         .merge(
             second_purchase,
-            on="customer_id",
+            on="golden_customer_id",
             how="left",
             validate="one_to_one",
         )
     )
 
     value_columns = [
-        "customer_id",
+        "golden_customer_id",
         "customer_value_tier",
         "rfm_segment",
         "commercial_value_score",
@@ -108,29 +108,20 @@ def build_customer_ltv(
 
     customer_ltv = customer_ltv.merge(
         customer_value[available_value_columns],
-        on="customer_id",
+        on="golden_customer_id",
         how="left",
         validate="one_to_one",
     )
 
-    customer_ltv["acquisition_cohort_month"] = month_start(
-        customer_ltv["acquisition_date"]
-    )
-
+    # In the resolved golden layer we deliberately do not use the
+    # hidden synthetic acquisition date. Cohort and tenure are based
+    # on observable first-purchase behaviour.
     customer_ltv["purchase_cohort_month"] = month_start(
         customer_ltv["first_purchase_date"]
     )
 
-    customer_ltv["customer_age_days"] = (
-        AS_OF_DATE - customer_ltv["acquisition_date"]
-    ).dt.days
-
     customer_ltv["purchase_tenure_days"] = (
         AS_OF_DATE - customer_ltv["first_purchase_date"]
-    ).dt.days
-
-    customer_ltv["acquisition_to_first_purchase_days"] = (
-        customer_ltv["first_purchase_date"] - customer_ltv["acquisition_date"]
     ).dt.days
 
     customer_ltv["days_to_second_purchase"] = (
@@ -160,11 +151,11 @@ def build_customer_ltv(
 
     transaction_value = (
         ordered_transactions[
-            ["customer_id", "transaction_date", "net_sales", "gross_margin"]
+            ["golden_customer_id", "transaction_date", "net_sales", "gross_margin"]
         ]
         .merge(
-            customer_ltv[["customer_id", "first_purchase_date"]],
-            on="customer_id",
+            customer_ltv[["golden_customer_id", "first_purchase_date"]],
+            on="golden_customer_id",
             how="left",
             validate="many_to_one",
         )
@@ -180,7 +171,7 @@ def build_customer_ltv(
 
         window_value = (
             transaction_value.loc[in_window]
-            .groupby("customer_id")
+            .groupby("golden_customer_id")
             .agg(
                 **{
                     f"m{months}_sales": ("net_sales", "sum"),
@@ -192,7 +183,7 @@ def build_customer_ltv(
 
         customer_ltv = customer_ltv.merge(
             window_value,
-            on="customer_id",
+            on="golden_customer_id",
             how="left",
             validate="one_to_one",
         )
@@ -223,21 +214,21 @@ def build_cohort_retention(
 ) -> pd.DataFrame:
     purchased_customers = customer_ltv.loc[
         customer_ltv["has_purchased"],
-        ["customer_id", "first_purchase_date", "purchase_cohort_month"],
+        ["golden_customer_id", "first_purchase_date", "purchase_cohort_month"],
     ].copy()
 
     cohort_sizes = (
         purchased_customers.groupby("purchase_cohort_month")
-        .agg(cohort_customers=("customer_id", "nunique"))
+        .agg(cohort_customers=("golden_customer_id", "nunique"))
         .reset_index()
     )
 
     activity = (
-        transactions[["customer_id", "transaction_date"]]
+        transactions[["golden_customer_id", "transaction_date"]]
         .drop_duplicates()
         .merge(
             purchased_customers,
-            on="customer_id",
+            on="golden_customer_id",
             how="inner",
             validate="many_to_one",
         )
@@ -252,7 +243,7 @@ def build_cohort_retention(
 
     active_by_age = (
         activity.groupby(["purchase_cohort_month", "cohort_age_month"])
-        .agg(active_customers=("customer_id", "nunique"))
+        .agg(active_customers=("golden_customer_id", "nunique"))
         .reset_index()
     )
 
@@ -304,15 +295,15 @@ def build_customer_movement_events(
     transactions: pd.DataFrame,
 ) -> pd.DataFrame:
     purchase_dates = (
-        transactions[["customer_id", "transaction_date"]]
+        transactions[["golden_customer_id", "transaction_date"]]
         .drop_duplicates()
-        .sort_values(["customer_id", "transaction_date"])
+        .sort_values(["golden_customer_id", "transaction_date"])
     )
 
     events = []
 
     for customer_id, customer_history in purchase_dates.groupby(
-        "customer_id",
+        "golden_customer_id",
         sort=False,
     ):
         dates = (
@@ -326,7 +317,7 @@ def build_customer_movement_events(
 
         events.append(
             {
-                "customer_id": customer_id,
+                "golden_customer_id": customer_id,
                 "event_date": dates[0],
                 "event_type": "New",
                 "active_change": 1,
@@ -365,7 +356,7 @@ def build_customer_movement_events(
                     if lapse_date <= AS_OF_DATE:
                         events.append(
                             {
-                                "customer_id": customer_id,
+                                "golden_customer_id": customer_id,
                                 "event_date": lapse_date,
                                 "event_type": "Lapsed",
                                 "active_change": -1,
@@ -375,7 +366,7 @@ def build_customer_movement_events(
                     if current_date <= AS_OF_DATE:
                         events.append(
                             {
-                                "customer_id": customer_id,
+                                "golden_customer_id": customer_id,
                                 "event_date": current_date,
                                 "event_type": "Reactivated",
                                 "active_change": 1,
@@ -407,7 +398,7 @@ def build_customer_movement_events(
             if final_lapse_date <= AS_OF_DATE:
                 events.append(
                     {
-                        "customer_id": customer_id,
+                        "golden_customer_id": customer_id,
                         "event_date": final_lapse_date,
                         "event_type": "Lapsed",
                         "active_change": -1,
@@ -432,7 +423,7 @@ def build_customer_growth_monthly(
         .pivot_table(
             index="month",
             columns="event_type",
-            values="customer_id",
+            values="golden_customer_id",
             aggfunc="nunique",
             fill_value=0,
         )
@@ -530,7 +521,7 @@ def build_cohort_summary(
     summary = (
         purchased.groupby("purchase_cohort_month")
         .agg(
-            cohort_customers=("customer_id", "nunique"),
+            cohort_customers=("golden_customer_id", "nunique"),
             repeat_customers=("repeat_customer", "sum"),
             observed_orders=("observed_orders", "sum"),
             observed_sales=("observed_ltv_sales", "sum"),
@@ -691,7 +682,15 @@ def run_qa(
     print("\nCUSTOMER GROWTH & VALUE QA")
     print("=" * 80)
 
-    print(f"Customers: {len(customer_ltv):,}")
+    print(f"Resolved golden customers: {len(customer_ltv):,}")
+    print(
+        "Unique golden customer IDs: "
+        f"{customer_ltv['golden_customer_id'].nunique():,}"
+    )
+    print(
+        "Duplicate golden customer IDs: "
+        f"{customer_ltv['golden_customer_id'].duplicated().sum():,}"
+    )
     print(
         "Customers with purchases: "
         f"{customer_ltv['has_purchased'].sum():,}"
@@ -908,6 +907,42 @@ def main() -> None:
     customer_value = pd.read_parquet(
         CUSTOMER_VALUE_FILE
     )
+
+    required_inputs = {
+        "Golden customer master": (
+            customer_master,
+            {"golden_customer_id", "state"},
+        ),
+        "Golden customer transactions": (
+            transactions,
+            {
+                "golden_customer_id",
+                "transaction_date",
+                "order_id",
+                "units",
+                "net_sales",
+                "gross_margin",
+            },
+        ),
+        "Customer value": (
+            customer_value,
+            {"golden_customer_id"},
+        ),
+    }
+
+    for label, (frame, required) in required_inputs.items():
+        missing = required - set(frame.columns)
+        if missing:
+            raise ValueError(
+                f"{label} is missing required columns: "
+                f"{sorted(missing)}"
+            )
+
+    if customer_master["golden_customer_id"].duplicated().any():
+        raise ValueError(
+            "Golden customer master must contain "
+            "one row per golden_customer_id."
+        )
 
     print(
         "Building customer growth, "

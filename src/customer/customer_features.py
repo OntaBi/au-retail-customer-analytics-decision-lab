@@ -10,11 +10,11 @@ import pandas as pd
 
 AS_OF_DATE = pd.Timestamp("2026-07-31")
 
-INPUT_DIR = Path("data/generated")
+INPUT_DIR = Path("data/runtime")
 OUTPUT_DIR = Path("data/runtime")
 
-CUSTOMER_FILE = INPUT_DIR / "customer_master.parquet"
-TRANSACTION_FILE = INPUT_DIR / "transactions.parquet"
+CUSTOMER_FILE = INPUT_DIR / "golden_customer_master.parquet"
+TRANSACTION_FILE = INPUT_DIR / "golden_customer_transactions.parquet"
 
 OUTPUT_FILE = OUTPUT_DIR / "customer_features.parquet"
 
@@ -30,7 +30,7 @@ def build_customer_summary(
 
     summary = (
         transactions
-        .groupby("customer_id")
+        .groupby("golden_customer_id")
         .agg(
             first_purchase_date=("transaction_date", "min"),
             last_purchase_date=("transaction_date", "max"),
@@ -56,15 +56,32 @@ def build_customer_summary(
 
     result = customers[
         [
-            "customer_id",
+            "golden_customer_id",
             "state",
-            "acquisition_date",
         ]
     ].merge(
         summary,
-        on="customer_id",
+        on="golden_customer_id",
         how="left",
+        validate="one_to_one",
     )
+
+    # Golden identities with no observed purchases remain part of
+    # the analytical customer universe. Monetary/order measures are
+    # zero; purchase dates and recency remain null.
+    zero_fill_columns = [
+        "orders",
+        "units",
+        "net_sales",
+        "gross_margin",
+        "avg_order_value",
+    ]
+
+    for column in zero_fill_columns:
+        result[column] = (
+            result[column]
+            .fillna(0)
+        )
 
     return result
 
@@ -79,17 +96,17 @@ def build_purchase_gaps(
 
     purchase_dates = (
         transactions[
-            ["customer_id", "transaction_date"]
+            ["golden_customer_id", "transaction_date"]
         ]
         .drop_duplicates()
         .sort_values(
-            ["customer_id", "transaction_date"]
+            ["golden_customer_id", "transaction_date"]
         )
     )
 
     purchase_dates["previous_purchase_date"] = (
         purchase_dates
-        .groupby("customer_id")["transaction_date"]
+        .groupby("golden_customer_id")["transaction_date"]
         .shift(1)
     )
 
@@ -109,7 +126,7 @@ def build_cadence_features(
 
     cadence = (
         purchase_gaps
-        .groupby("customer_id")
+        .groupby("golden_customer_id")
         .agg(
             observed_purchase_gaps=(
                 "purchase_gap_days",
@@ -157,7 +174,7 @@ def build_trailing_value(
 
     value = (
         trailing
-        .groupby("customer_id")
+        .groupby("golden_customer_id")
         .agg(
             trailing_12m_orders=("order_id", "nunique"),
             trailing_12m_sales=("net_sales", "sum"),
@@ -259,7 +276,7 @@ def add_lifecycle_status(
 
     result = customers.copy()
 
-    no_purchase = result["orders"].isna()
+    no_purchase = result["orders"].fillna(0).eq(0)
 
     low_evidence = (
         result["cadence_confidence"].eq("Low")
@@ -324,13 +341,13 @@ def build_customer_features(
 
     features = customer_summary.merge(
         cadence,
-        on="customer_id",
+        on="golden_customer_id",
         how="left",
     )
 
     features = features.merge(
         trailing_value,
-        on="customer_id",
+        on="golden_customer_id",
         how="left",
     )
 
@@ -360,7 +377,23 @@ def run_qa(
     print("-" * 60)
 
     print(
-        f"Customers: {len(features):,}"
+        f"Resolved golden customers: "
+        f"{len(features):,}"
+    )
+
+    print(
+        f"Golden customers with purchases: "
+        f"{features['orders'].gt(0).sum():,}"
+    )
+
+    print(
+        f"Golden customers never purchased: "
+        f"{features['orders'].eq(0).sum():,}"
+    )
+
+    print(
+        f"Unique golden customer IDs: "
+        f"{features['golden_customer_id'].nunique():,}"
     )
 
     print(
@@ -383,6 +416,17 @@ def run_qa(
     print(
         features["lifecycle_status"]
         .value_counts(dropna=False)
+    )
+
+    duplicate_ids = (
+        features["golden_customer_id"]
+        .duplicated()
+        .sum()
+    )
+
+    print(
+        f"Duplicate golden customer IDs: "
+        f"{duplicate_ids:,}"
     )
 
     print("\nMedian metrics:")
@@ -412,7 +456,7 @@ def main() -> None:
         exist_ok=True,
     )
 
-    print("Loading source data...")
+    print("Loading golden customer data...")
 
     customers = pd.read_parquet(
         CUSTOMER_FILE
@@ -422,7 +466,49 @@ def main() -> None:
         TRANSACTION_FILE
     )
 
-    print("Building customer features...")
+    required_customer_columns = {
+        "golden_customer_id",
+        "state",
+    }
+
+    required_transaction_columns = {
+        "golden_customer_id",
+        "order_id",
+        "transaction_date",
+        "units",
+        "net_sales",
+        "gross_margin",
+    }
+
+    missing_customer_columns = (
+        required_customer_columns
+        - set(customers.columns)
+    )
+
+    missing_transaction_columns = (
+        required_transaction_columns
+        - set(transactions.columns)
+    )
+
+    if missing_customer_columns:
+        raise ValueError(
+            "Golden customer master is missing: "
+            f"{sorted(missing_customer_columns)}"
+        )
+
+    if missing_transaction_columns:
+        raise ValueError(
+            "Golden customer transactions are missing: "
+            f"{sorted(missing_transaction_columns)}"
+        )
+
+    if customers["golden_customer_id"].duplicated().any():
+        raise ValueError(
+            "Golden customer master must contain "
+            "one row per golden_customer_id."
+        )
+
+    print("Building golden customer features...")
 
     features = build_customer_features(
         customers,

@@ -25,8 +25,8 @@ APP_ROOT = Path(__file__).resolve().parents[1]
 TRANSACTION_FILE = (
     APP_ROOT
     / "data"
-    / "generated"
-    / "transactions.parquet"
+    / "runtime"
+    / "golden_customer_transactions.parquet"
 )
 
 CUSTOMER_LTV_FILE = (
@@ -66,18 +66,18 @@ def load_data():
     cluster_lookup = (
         clusters[
             [
-                "customer_id",
+                "golden_customer_id",
                 "cluster_name",
             ]
         ]
         .drop_duplicates(
-            subset=["customer_id"]
+            subset=["golden_customer_id"]
         )
     )
 
     customer_ltv = customer_ltv.merge(
         cluster_lookup,
-        on="customer_id",
+        on="golden_customer_id",
         how="left",
         validate="one_to_one",
     )
@@ -111,7 +111,7 @@ def build_filtered_growth_outputs(
     selected_ltv = (
         customer_ltv.loc[
             customer_ltv[
-                "customer_id"
+                "golden_customer_id"
             ].isin(selected_ids)
         ]
         .copy()
@@ -120,7 +120,7 @@ def build_filtered_growth_outputs(
     selected_transactions = (
         transactions.loc[
             transactions[
-                "customer_id"
+                "golden_customer_id"
             ].isin(selected_ids)
         ]
         .copy()
@@ -195,7 +195,7 @@ def build_customer_value_funnel(
     selected_ltv = (
         customer_ltv.loc[
             customer_ltv[
-                "customer_id"
+                "golden_customer_id"
             ].isin(selected_ids)
             & customer_ltv[
                 "has_purchased"
@@ -208,7 +208,7 @@ def build_customer_value_funnel(
     selected_transactions = (
         transactions.loc[
             transactions[
-                "customer_id"
+                "golden_customer_id"
             ].isin(selected_ids)
         ]
         .copy()
@@ -261,7 +261,7 @@ def build_customer_value_funnel(
     tx = (
         selected_transactions[
             [
-                "customer_id",
+                "golden_customer_id",
                 "transaction_date",
                 "order_id",
             ]
@@ -270,11 +270,11 @@ def build_customer_value_funnel(
         .merge(
             mature[
                 [
-                    "customer_id",
+                    "golden_customer_id",
                     "first_purchase_date",
                 ]
             ],
-            on="customer_id",
+            on="golden_customer_id",
             how="inner",
             validate="many_to_one",
         )
@@ -313,7 +313,7 @@ def build_customer_value_funnel(
             )
         ]
         .groupby(
-            "customer_id"
+            "golden_customer_id"
         )
         .agg(
             orders_first_12m=(
@@ -339,7 +339,7 @@ def build_customer_value_funnel(
             ].ge(12)
         ]
         .groupby(
-            "customer_id"
+            "golden_customer_id"
         )
         .agg(
             active_m12_plus=(
@@ -354,13 +354,13 @@ def build_customer_value_funnel(
         mature
         .merge(
             first_12m,
-            on="customer_id",
+            on="golden_customer_id",
             how="left",
             validate="one_to_one",
         )
         .merge(
             m12_plus,
-            on="customer_id",
+            on="golden_customer_id",
             how="left",
             validate="one_to_one",
         )
@@ -514,7 +514,7 @@ st.title(
 
 st.caption(
     "Synthetic Australian retail customer scenario | "
-    "20,000 customers | Behaviour → Cadence → Value → Decision"
+    "Resolved Golden Customers | Behaviour → Cadence → Value → Decision"
 )
 
 st.header(
@@ -543,7 +543,7 @@ if filtered_customers.empty:
 selected_ids = tuple(
     sorted(
         filtered_customers[
-            "customer_id"
+            "golden_customer_id"
         ]
         .astype(str)
         .tolist()

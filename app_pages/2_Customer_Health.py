@@ -47,7 +47,7 @@ def load_data():
 
     cluster_lookup = clusters[
         [
-            "customer_id",
+            "golden_customer_id",
             "cluster",
             "cluster_name",
         ]
@@ -55,7 +55,7 @@ def load_data():
 
     data = priority.merge(
         cluster_lookup,
-        on="customer_id",
+        on="golden_customer_id",
         how="left",
         validate="one_to_one",
     )
@@ -85,7 +85,7 @@ st.title(
 
 st.caption(
     "Synthetic Australian retail customer scenario | "
-    "20,000 customers | Behaviour → Cadence → Value → Decision"
+    "Resolved Golden Customers | Behaviour → Cadence → Value → Decision"
 )
 
 st.header(
@@ -116,7 +116,7 @@ if filtered.empty:
 # =========================================================
 
 total_customers = (
-    filtered["customer_id"]
+    filtered["golden_customer_id"]
     .nunique()
 )
 
@@ -549,7 +549,7 @@ else:
         y="trailing_12m_margin",
         size="plot_sales",
         color="cadence_trend_status",
-        hover_name="customer_id",
+        hover_name="golden_customer_id",
         hover_data={
             "cluster_name": True,
             "customer_value_tier": True,
@@ -657,7 +657,7 @@ watchlist_export = (
     )
     [
         [
-            "customer_id",
+            "golden_customer_id",
             "cluster_name",
             "customer_value_tier",
             "lifecycle_status",
@@ -801,7 +801,7 @@ else:
     watchlist = (
         watchlist.rename(
             columns={
-                "customer_id":
+                "golden_customer_id":
                     "Customer",
                 "cluster_name":
                     "Customer Segment",
@@ -844,8 +844,8 @@ else:
     crm_export = (
         watchlist_export.rename(
             columns={
-                "customer_id":
-                    "customer_id",
+                "golden_customer_id":
+                    "golden_customer_id",
                 "cluster_name":
                     "customer_segment",
                 "customer_value_tier":

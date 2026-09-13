@@ -3,383 +3,295 @@ from pathlib import Path
 import numpy as np
 import pandas as pd
 
+from sklearn.cluster import KMeans
+from sklearn.decomposition import PCA
+from sklearn.impute import SimpleImputer
+from sklearn.metrics import silhouette_score
+from sklearn.preprocessing import StandardScaler
+
 
 # ---------------------------------------------------------------------
 # Configuration
 # ---------------------------------------------------------------------
 
-AS_OF_DATE = pd.Timestamp("2026-07-31")
-
-CUSTOMER_FILE = Path(
-    "data/generated/customer_master.parquet"
-)
-
-TRANSACTION_FILE = Path(
-    "data/generated/transactions.parquet"
-)
-
-FEATURE_FILE = Path(
-    "data/runtime/customer_features.parquet"
-)
-
-OUTPUT_FILE = Path(
+INPUT_FILE = Path(
     "data/runtime/clustering_features.parquet"
 )
 
+OUTPUT_DIR = Path("outputs")
 
-# ---------------------------------------------------------------------
-# Core transaction behaviour
-# ---------------------------------------------------------------------
+DIAGNOSTICS_FILE = (
+    OUTPUT_DIR / "clustering_diagnostics.csv"
+)
 
-def build_core_behaviour(
-    transactions: pd.DataFrame,
-) -> pd.DataFrame:
+CLUSTERED_FILE = Path(
+    "data/runtime/customer_clusters.parquet"
+)
 
-    core = (
-        transactions
-        .groupby("customer_id")
-        .agg(
-            orders=("order_id", "nunique"),
-            total_sales=("net_sales", "sum"),
-            total_margin=("gross_margin", "sum"),
-            total_units=("units", "sum"),
-            avg_discount_pct=("discount_pct", "mean"),
-            first_purchase_date=("transaction_date", "min"),
-            last_purchase_date=("transaction_date", "max"),
-        )
-        .reset_index()
-    )
+RANDOM_STATE = 42
 
-    core["avg_order_value"] = (
-        core["total_sales"]
-        / core["orders"]
-    )
+K_VALUES = range(3, 10)
 
-    core["avg_margin_per_order"] = (
-        core["total_margin"]
-        / core["orders"]
-    )
+FINAL_K = 6
 
-    core["units_per_order"] = (
-        core["total_units"]
-        / core["orders"]
-    )
-
-    core["tenure_days"] = (
-        AS_OF_DATE
-        - core["first_purchase_date"]
-    ).dt.days
-
-    core["days_since_last_purchase"] = (
-        AS_OF_DATE
-        - core["last_purchase_date"]
-    ).dt.days
-
-    return core
+CLUSTER_NAMES = {
+    0: "Big Ticket Shoppers",
+    1: "High Frequency Generalists",
+    2: "Promotion-Led Shoppers",
+    3: "Category Specialists",
+    4: "Omnichannel Mainstream",
+    5: "Store-Led Shoppers",
+}
 
 
 # ---------------------------------------------------------------------
-# Discount behaviour
+# Features used by clustering
 # ---------------------------------------------------------------------
 
-def build_discount_behaviour(
-    transactions: pd.DataFrame,
-) -> pd.DataFrame:
+CLUSTER_FEATURES = [
+    # Purchase intensity
+    "orders",
+    "avg_order_value",
+    "units_per_order",
+    "avg_margin_per_order",
 
-    discount = transactions[
-        [
-            "customer_id",
-            "order_id",
-            "discount_pct",
-        ]
-    ].copy()
+    # Promotion behaviour
+    "avg_discount_pct",
+    "discounted_order_share",
 
-    discount["discounted_order"] = (
-        discount["discount_pct"] > 0
-    )
+    # Channel behaviour
+    "store_share",
+    "online_share",
+    "click_collect_share",
+    "channels_used",
 
-    discount_summary = (
-        discount
-        .groupby("customer_id")
-        .agg(
-            discounted_order_share=(
-                "discounted_order",
-                "mean",
-            ),
-            avg_discount_pct=(
-                "discount_pct",
-                "mean",
-            ),
-            max_discount_pct=(
-                "discount_pct",
-                "max",
-            ),
-        )
-        .reset_index()
-    )
+    # Category breadth / concentration
+    "categories_used",
+    "category_concentration",
+    "dominant_category_share",
 
-    return discount_summary
+    # Cadence
+    "median_purchase_gap_days",
+    "cadence_cv",
+]
+
+
+LOG_FEATURES = [
+    "orders",
+    "avg_order_value",
+    "avg_margin_per_order",
+    "median_purchase_gap_days",
+]
 
 
 # ---------------------------------------------------------------------
-# Channel behaviour
+# Prepare feature matrix
 # ---------------------------------------------------------------------
 
-def build_channel_behaviour(
-    transactions: pd.DataFrame,
-) -> pd.DataFrame:
-
-    channel_counts = (
-        transactions
-        .groupby(
-            [
-                "customer_id",
-                "channel",
-            ]
-        )
-        .size()
-        .unstack(
-            fill_value=0
-        )
-    )
-
-    for channel in [
-        "Store",
-        "Online",
-        "Click & Collect",
-    ]:
-        if channel not in channel_counts.columns:
-            channel_counts[channel] = 0
-
-    total_orders = (
-        channel_counts.sum(axis=1)
-    )
-
-    channel_features = pd.DataFrame(
-        {
-            "customer_id":
-                channel_counts.index,
-
-            "store_share":
-                (
-                    channel_counts["Store"]
-                    / total_orders
-                ),
-
-            "online_share":
-                (
-                    channel_counts["Online"]
-                    / total_orders
-                ),
-
-            "click_collect_share":
-                (
-                    channel_counts["Click & Collect"]
-                    / total_orders
-                ),
-
-            "channels_used":
-                (
-                    channel_counts.gt(0)
-                    .sum(axis=1)
-                ),
-        }
-    ).reset_index(drop=True)
-
-    return channel_features
-
-
-# ---------------------------------------------------------------------
-# Category behaviour
-# ---------------------------------------------------------------------
-
-def build_category_behaviour(
-    transactions: pd.DataFrame,
-) -> pd.DataFrame:
-
-    category_counts = (
-        transactions
-        .groupby(
-            [
-                "customer_id",
-                "category",
-            ]
-        )
-        .size()
-        .unstack(
-            fill_value=0
-        )
-    )
-
-    total_orders = (
-        category_counts.sum(axis=1)
-    )
-
-    category_share = (
-        category_counts
-        .div(
-            total_orders,
-            axis=0,
-        )
-    )
-
-    # Herfindahl-style concentration:
-    # closer to 1 = heavily concentrated in one category.
-    category_concentration = (
-        category_share
-        .pow(2)
-        .sum(axis=1)
-    )
-
-    dominant_category_share = (
-        category_share.max(axis=1)
-    )
-
-    categories_used = (
-        category_counts
-        .gt(0)
-        .sum(axis=1)
-    )
-
-    category_features = pd.DataFrame(
-        {
-            "customer_id":
-                category_counts.index,
-
-            "categories_used":
-                categories_used,
-
-            "category_concentration":
-                category_concentration,
-
-            "dominant_category_share":
-                dominant_category_share,
-        }
-    ).reset_index(drop=True)
-
-    return category_features
-
-
-# ---------------------------------------------------------------------
-# Cadence behaviour
-# ---------------------------------------------------------------------
-
-def build_cadence_behaviour(
-    customer_features: pd.DataFrame,
-) -> pd.DataFrame:
-
-    columns = [
-        "customer_id",
-        "median_purchase_gap_days",
-        "mean_purchase_gap_days",
-        "purchase_gap_std_days",
-        "cadence_cv",
-        "observed_purchase_gaps",
-    ]
-
-    return customer_features[
-        columns
-    ].copy()
-
-
-# ---------------------------------------------------------------------
-# Build clustering feature table
-# ---------------------------------------------------------------------
-
-def build_clustering_features(
+def prepare_features(
     customers: pd.DataFrame,
-    transactions: pd.DataFrame,
-    customer_features: pd.DataFrame,
+):
+
+    matrix = customers[
+        CLUSTER_FEATURES
+    ].copy()
+
+    # Reduce skew while preserving relative differences.
+    for column in LOG_FEATURES:
+        matrix[column] = np.log1p(
+            matrix[column]
+        )
+
+    # Customers with insufficient repeat history should remain
+    # clusterable rather than being excluded.
+    imputer = SimpleImputer(
+        strategy="median"
+    )
+
+    imputed = imputer.fit_transform(
+        matrix
+    )
+
+    scaler = StandardScaler()
+
+    scaled = scaler.fit_transform(
+        imputed
+    )
+
+    return (
+        scaled,
+        imputer,
+        scaler,
+    )
+
+
+# ---------------------------------------------------------------------
+# Evaluate candidate K values
+# ---------------------------------------------------------------------
+
+def evaluate_clusters(
+    scaled_features: np.ndarray,
 ) -> pd.DataFrame:
 
-    # Only customers with at least one purchase are cluster candidates.
-    purchasing_customers = (
-        customers[
-            ["customer_id"]
-        ]
-        .merge(
-            transactions[
-                ["customer_id"]
-            ]
-            .drop_duplicates(),
-            on="customer_id",
-            how="inner",
+    diagnostics = []
+
+    for k in K_VALUES:
+
+        model = KMeans(
+            n_clusters=k,
+            random_state=RANDOM_STATE,
+            n_init=20,
         )
-    )
 
-    core = build_core_behaviour(
-        transactions
-    )
-
-    discount = build_discount_behaviour(
-        transactions
-    )
-
-    channel = build_channel_behaviour(
-        transactions
-    )
-
-    category = build_category_behaviour(
-        transactions
-    )
-
-    cadence = build_cadence_behaviour(
-        customer_features
-    )
-
-    features = (
-        purchasing_customers
-        .merge(
-            core,
-            on="customer_id",
-            how="left",
-            validate="one_to_one",
+        labels = model.fit_predict(
+            scaled_features
         )
-        .merge(
-            discount,
-            on="customer_id",
-            how="left",
-            validate="one_to_one",
-            suffixes=(
-                "",
-                "_discount",
+
+        silhouette = silhouette_score(
+            scaled_features,
+            labels,
+            sample_size=min(
+                10000,
+                len(labels),
             ),
+            random_state=RANDOM_STATE,
         )
-        .merge(
-            channel,
-            on="customer_id",
-            how="left",
-            validate="one_to_one",
+
+        counts = pd.Series(
+            labels
+        ).value_counts()
+
+        diagnostics.append(
+            {
+                "k": k,
+                "silhouette_score":
+                    silhouette,
+                "inertia":
+                    model.inertia_,
+                "smallest_cluster":
+                    counts.min(),
+                "largest_cluster":
+                    counts.max(),
+                "smallest_cluster_pct":
+                    counts.min()
+                    / len(labels),
+                "largest_cluster_pct":
+                    counts.max()
+                    / len(labels),
+            }
         )
-        .merge(
-            category,
-            on="customer_id",
-            how="left",
-            validate="one_to_one",
-        )
-        .merge(
-            cadence,
-            on="customer_id",
-            how="left",
-            validate="one_to_one",
-        )
+
+    return pd.DataFrame(
+        diagnostics
     )
 
-    # Keep one average discount field.
-    if "avg_discount_pct_discount" in features.columns:
-        features["avg_discount_pct"] = (
-            features[
-                "avg_discount_pct_discount"
-            ]
-        )
 
-        features = features.drop(
-            columns=[
-                "avg_discount_pct_discount"
-            ]
-        )
+# ---------------------------------------------------------------------
+# Choose candidate K
+# ---------------------------------------------------------------------
 
-    return features
+def choose_candidate_k(
+    diagnostics: pd.DataFrame,
+) -> int:
+
+    # Avoid solutions containing tiny clusters unless they provide
+    # exceptional separation.
+    viable = diagnostics.loc[
+        diagnostics[
+            "smallest_cluster_pct"
+        ] >= 0.03
+    ].copy()
+
+    if viable.empty:
+        viable = diagnostics.copy()
+
+    best_row = (
+        viable
+        .sort_values(
+            "silhouette_score",
+            ascending=False,
+        )
+        .iloc[0]
+    )
+
+    return int(
+        best_row["k"]
+    )
+
+
+# ---------------------------------------------------------------------
+# Fit final candidate model
+# ---------------------------------------------------------------------
+
+def fit_final_model(
+    scaled_features: np.ndarray,
+    k: int,
+):
+
+    model = KMeans(
+        n_clusters=k,
+        random_state=RANDOM_STATE,
+        n_init=30,
+    )
+
+    labels = model.fit_predict(
+        scaled_features
+    )
+
+    return model, labels
+
+
+# ---------------------------------------------------------------------
+# PCA coordinates for visualisation
+# ---------------------------------------------------------------------
+
+def build_pca_coordinates(
+    scaled_features: np.ndarray,
+):
+
+    pca = PCA(
+        n_components=2,
+        random_state=RANDOM_STATE,
+    )
+
+    coordinates = pca.fit_transform(
+        scaled_features
+    )
+
+    return (
+        coordinates,
+        pca.explained_variance_ratio_,
+    )
+
+
+# ---------------------------------------------------------------------
+# Build output
+# ---------------------------------------------------------------------
+
+def build_cluster_output(
+    customers: pd.DataFrame,
+    labels: np.ndarray,
+    pca_coordinates: np.ndarray,
+) -> pd.DataFrame:
+
+    output = customers.copy()
+
+    output["cluster"] = labels
+
+    output["cluster_name"] = (
+        output["cluster"]
+        .map(CLUSTER_NAMES)
+    )
+
+    output["pca_1"] = (
+        pca_coordinates[:, 0]
+    )
+
+    output["pca_2"] = (
+        pca_coordinates[:, 1]
+    )
+
+    return output
 
 
 # ---------------------------------------------------------------------
@@ -387,73 +299,122 @@ def build_clustering_features(
 # ---------------------------------------------------------------------
 
 def run_qa(
-    features: pd.DataFrame,
+    clustered: pd.DataFrame,
+    diagnostics: pd.DataFrame,
+    selected_k: int,
+    explained_variance: np.ndarray,
 ) -> None:
 
-    print("\nCLUSTERING FEATURE QA")
+    print("\nCUSTOMER CLUSTERING QA")
     print("=" * 80)
 
     print(
-        f"Customers available for clustering: "
-        f"{len(features):,}"
+        f"Golden customers clustered: "
+        f"{len(clustered):,}"
     )
 
     print(
-        f"Feature columns: "
-        f"{len(features.columns) - 1}"
-    )
-
-    print("\nMissing values by feature:")
-
-    missing = (
-        features
-        .drop(
-            columns=["customer_id"]
-        )
-        .isna()
-        .sum()
-        .sort_values(
-            ascending=False
-        )
+        f"Unique golden customer IDs: "
+        f"{clustered['golden_customer_id'].nunique():,}"
     )
 
     print(
-        missing[
-            missing > 0
+        f"Duplicate golden customer IDs: "
+        f"{clustered['golden_customer_id'].duplicated().sum():,}"
+    )
+
+    print("\nK-MEANS DIAGNOSTICS")
+    print("-" * 80)
+
+    display = diagnostics.copy()
+
+    display[
+        "silhouette_score"
+    ] = (
+        display[
+            "silhouette_score"
         ]
-    )
-
-    print("\nBehavioural medians:")
-
-    median_columns = [
-        "orders",
-        "avg_order_value",
-        "units_per_order",
-        "avg_discount_pct",
-        "discounted_order_share",
-        "store_share",
-        "online_share",
-        "channels_used",
-        "categories_used",
-        "category_concentration",
-        "median_purchase_gap_days",
-        "cadence_cv",
-    ]
-
-    available_columns = [
-        column
-        for column in median_columns
-        if column in features.columns
-    ]
-
-    print(
-        features[
-            available_columns
-        ]
-        .median(
-            numeric_only=True
-        )
         .round(3)
+    )
+
+    display["inertia"] = (
+        display["inertia"]
+        .round(0)
+    )
+
+    display[
+        "smallest_cluster_pct"
+    ] = (
+        display[
+            "smallest_cluster_pct"
+        ]
+        .mul(100)
+        .round(1)
+    )
+
+    display[
+        "largest_cluster_pct"
+    ] = (
+        display[
+            "largest_cluster_pct"
+        ]
+        .mul(100)
+        .round(1)
+    )
+
+    print(
+        display.to_string(
+            index=False
+        )
+    )
+
+    print(
+        f"\nCandidate K selected: "
+        f"{selected_k}"
+    )
+
+    print(
+        "\nCluster sizes:"
+    )
+
+    cluster_sizes = (
+        clustered["cluster"]
+        .value_counts()
+        .sort_index()
+    )
+
+    print(cluster_sizes)
+
+    print(
+        "\nCluster share (%):"
+    )
+
+    print(
+        (
+            cluster_sizes
+            / len(clustered)
+            * 100
+        )
+        .round(1)
+    )
+
+    print(
+        "\nPCA explained variance:"
+    )
+
+    print(
+        f"PC1: "
+        f"{explained_variance[0]:.1%}"
+    )
+
+    print(
+        f"PC2: "
+        f"{explained_variance[1]:.1%}"
+    )
+
+    print(
+        f"Combined: "
+        f"{explained_variance.sum():.1%}"
     )
 
 
@@ -463,44 +424,118 @@ def run_qa(
 
 def main() -> None:
 
-    OUTPUT_FILE.parent.mkdir(
+    OUTPUT_DIR.mkdir(
         parents=True,
         exist_ok=True,
     )
 
-    print("Loading source data...")
-
-    customers = pd.read_parquet(
-        CUSTOMER_FILE
-    )
-
-    transactions = pd.read_parquet(
-        TRANSACTION_FILE
-    )
-
-    customer_features = pd.read_parquet(
-        FEATURE_FILE
+    CLUSTERED_FILE.parent.mkdir(
+        parents=True,
+        exist_ok=True,
     )
 
     print(
-        "Building clustering feature matrix..."
+        "Loading clustering features..."
     )
 
-    features = build_clustering_features(
+    customers = pd.read_parquet(
+        INPUT_FILE
+    )
+
+    if "golden_customer_id" not in customers.columns:
+        raise ValueError(
+            "Clustering features must contain "
+            "golden_customer_id."
+        )
+
+    if customers["golden_customer_id"].duplicated().any():
+        raise ValueError(
+            "Clustering features must contain "
+            "one row per golden_customer_id."
+        )
+
+    missing_features = (
+        set(CLUSTER_FEATURES)
+        - set(customers.columns)
+    )
+
+    if missing_features:
+        raise ValueError(
+            "Clustering features are missing "
+            f"required model inputs: "
+            f"{sorted(missing_features)}"
+        )
+
+    print(
+        "Preparing feature matrix..."
+    )
+
+    (
+        scaled_features,
+        _,
+        _,
+    ) = prepare_features(
+        customers
+    )
+
+    print(
+        "Evaluating candidate cluster counts..."
+    )
+
+    diagnostics = evaluate_clusters(
+        scaled_features
+    )
+
+    # selected_k = choose_candidate_k(
+    #     diagnostics
+    # )
+
+    # K=6 selected based on statistical diagnostics,
+    # cluster stability and commercial interpretability.
+    selected_k = FINAL_K
+
+    print(
+        "Fitting candidate clustering model..."
+    )
+
+    _, labels = fit_final_model(
+        scaled_features,
+        selected_k,
+    )
+
+    (
+        pca_coordinates,
+        explained_variance,
+    ) = build_pca_coordinates(
+        scaled_features
+    )
+
+    clustered = build_cluster_output(
         customers,
-        transactions,
-        customer_features,
+        labels,
+        pca_coordinates,
     )
 
-    features.to_parquet(
-        OUTPUT_FILE,
+    diagnostics.to_csv(
+        DIAGNOSTICS_FILE,
         index=False,
     )
 
-    run_qa(features)
+    clustered.to_parquet(
+        CLUSTERED_FILE,
+        index=False,
+    )
 
-    print("\nFile created:")
-    print(OUTPUT_FILE)
+    run_qa(
+        clustered,
+        diagnostics,
+        selected_k,
+        explained_variance,
+    )
+
+    print("\nFiles created:")
+    print(DIAGNOSTICS_FILE)
+    print(CLUSTERED_FILE)
 
 
 if __name__ == "__main__":

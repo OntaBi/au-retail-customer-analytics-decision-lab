@@ -11,11 +11,11 @@ import pandas as pd
 AS_OF_DATE = pd.Timestamp("2026-07-31")
 
 CUSTOMER_MASTER_FILE = Path(
-    "data/generated/customer_master.parquet"
+    "data/runtime/golden_customer_master.parquet"
 )
 
 TRANSACTION_FILE = Path(
-    "data/generated/transactions.parquet"
+    "data/runtime/golden_customer_transactions.parquet"
 )
 
 FEATURE_FILE = Path(
@@ -37,7 +37,7 @@ def build_rfm_base(
 
     rfm = (
         transactions
-        .groupby("customer_id")
+        .groupby("golden_customer_id")
         .agg(
             rfm_last_purchase_date=(
                 "transaction_date",
@@ -191,7 +191,7 @@ def add_value_tier(
     # Never-purchased customers should not be assigned
     # commercial value based on zero trailing margin.
     result.loc[
-        result["orders"].isna(),
+        result["orders"].fillna(0).eq(0),
         "customer_value_tier",
     ] = "No Purchase"
 
@@ -208,7 +208,7 @@ def add_rfm_segment(
 
     result = customers.copy()
 
-    no_purchase = result["orders"].isna()
+    no_purchase = result["orders"].fillna(0).eq(0)
 
     champion = (
         result["r_score"].ge(4)
@@ -327,7 +327,7 @@ def add_commercial_value_score(
     ).round(1)
 
     result.loc[
-        result["orders"].isna(),
+        result["orders"].fillna(0).eq(0),
         "commercial_value_score",
     ] = 0.0
 
@@ -350,20 +350,19 @@ def build_customer_value(
 
     value = customer_master[
         [
-            "customer_id",
+            "golden_customer_id",
             "state",
-            "acquisition_date",
         ]
     ].merge(
         rfm,
-        on="customer_id",
+        on="golden_customer_id",
         how="left",
         validate="one_to_one",
     )
 
     feature_columns = customer_features[
         [
-            "customer_id",
+            "golden_customer_id",
             "orders",
             "days_since_last_purchase",
             "active_customer",
@@ -377,7 +376,7 @@ def build_customer_value(
 
     value = value.merge(
         feature_columns,
-        on="customer_id",
+        on="golden_customer_id",
         how="left",
         validate="one_to_one",
     )
@@ -407,8 +406,23 @@ def run_qa(
     print("=" * 75)
 
     print(
-        f"Customers: "
+        f"Resolved golden customers: "
         f"{len(value):,}"
+    )
+
+    print(
+        f"Unique golden customer IDs: "
+        f"{value['golden_customer_id'].nunique():,}"
+    )
+
+    print(
+        f"Duplicate golden customer IDs: "
+        f"{value['golden_customer_id'].duplicated().sum():,}"
+    )
+
+    print(
+        f"Never-purchased golden customers: "
+        f"{value['orders'].fillna(0).eq(0).sum():,}"
     )
 
     print("\nRFM segment:")
@@ -471,7 +485,7 @@ def main() -> None:
         exist_ok=True,
     )
 
-    print("Loading source data...")
+    print("Loading golden customer data...")
 
     customer_master = pd.read_parquet(
         CUSTOMER_MASTER_FILE
@@ -485,7 +499,71 @@ def main() -> None:
         FEATURE_FILE
     )
 
-    print("Building customer value features...")
+    required_master_columns = {
+        "golden_customer_id",
+        "state",
+    }
+
+    required_transaction_columns = {
+        "golden_customer_id",
+        "transaction_date",
+        "order_id",
+        "net_sales",
+        "gross_margin",
+    }
+
+    required_feature_columns = {
+        "golden_customer_id",
+        "orders",
+        "days_since_last_purchase",
+        "active_customer",
+        "lifecycle_status",
+        "trailing_12m_orders",
+        "trailing_12m_sales",
+        "trailing_12m_margin",
+        "avg_order_value",
+    }
+
+    missing_master = (
+        required_master_columns
+        - set(customer_master.columns)
+    )
+
+    missing_transactions = (
+        required_transaction_columns
+        - set(transactions.columns)
+    )
+
+    missing_features = (
+        required_feature_columns
+        - set(customer_features.columns)
+    )
+
+    if missing_master:
+        raise ValueError(
+            "Golden customer master is missing: "
+            f"{sorted(missing_master)}"
+        )
+
+    if missing_transactions:
+        raise ValueError(
+            "Golden customer transactions are missing: "
+            f"{sorted(missing_transactions)}"
+        )
+
+    if missing_features:
+        raise ValueError(
+            "Customer features are missing: "
+            f"{sorted(missing_features)}"
+        )
+
+    if customer_master["golden_customer_id"].duplicated().any():
+        raise ValueError(
+            "Golden customer master must contain "
+            "one row per golden_customer_id."
+        )
+
+    print("Building golden customer value features...")
 
     value = build_customer_value(
         customer_master,

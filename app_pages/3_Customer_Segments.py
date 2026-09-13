@@ -46,7 +46,7 @@ def load_data():
     )
 
     cluster_columns = [
-        "customer_id",
+        "golden_customer_id",
         "cluster",
         "cluster_name",
         "pca_1",
@@ -78,7 +78,7 @@ def load_data():
 
     data = priority.merge(
         cluster_lookup,
-        on="customer_id",
+        on="golden_customer_id",
         how="left",
         validate="one_to_one",
         suffixes=(
@@ -112,7 +112,7 @@ st.title(
 
 st.caption(
     "Synthetic Australian retail customer scenario | "
-    "20,000 customers | Behaviour → Cadence → Value → Decision"
+    "Resolved Golden Customers | Behaviour → Cadence → Value → Decision"
 )
 
 st.header(
@@ -148,12 +148,12 @@ clustered = filtered.loc[
 ].copy()
 
 total_customers = (
-    filtered["customer_id"]
+    filtered["golden_customer_id"]
     .nunique()
 )
 
 clustered_customers = (
-    clustered["customer_id"]
+    clustered["golden_customer_id"]
     .nunique()
 )
 
@@ -270,7 +270,7 @@ with left:
         )
         .agg(
             customers=(
-                "customer_id",
+                "golden_customer_id",
                 "nunique",
             ),
         )
@@ -426,7 +426,7 @@ else:
         x="pca_1",
         y="pca_2",
         color="cluster_name",
-        hover_name="customer_id",
+        hover_name="golden_customer_id",
         hover_data={
             "cluster_name": True,
             "customer_value_tier": True,
@@ -511,7 +511,7 @@ else:
         )
         .agg(
             customers=(
-                "customer_id",
+                "golden_customer_id",
                 "nunique",
             ),
             median_orders=(
@@ -953,7 +953,7 @@ commercial_summary = (
     )
     .agg(
         customers=(
-            "customer_id",
+            "golden_customer_id",
             "nunique",
         ),
         trailing_12m_sales=(

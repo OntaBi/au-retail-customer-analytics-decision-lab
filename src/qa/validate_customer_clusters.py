@@ -11,8 +11,16 @@ CUSTOMER_MASTER_FILE = Path(
     "data/generated/customer_master.parquet"
 )
 
+IDENTITY_GROUND_TRUTH_FILE = Path(
+    "data/generated/identity_ground_truth.parquet"
+)
+
+IDENTITY_RESOLUTION_FILE = Path(
+    "data/runtime/customer_identity_resolution.parquet"
+)
+
 TRANSACTION_FILE = Path(
-    "data/generated/transactions.parquet"
+    "data/runtime/golden_customer_transactions.parquet"
 )
 
 CLUSTER_FILE = Path(
@@ -50,7 +58,7 @@ def build_category_profile(
         transactions
         .groupby(
             [
-                "customer_id",
+                "golden_customer_id",
                 "category",
             ]
         )
@@ -96,7 +104,7 @@ def build_category_profile(
 
     result = category_share.merge(
         dominant_category,
-        on="customer_id",
+        on="golden_customer_id",
         how="left",
         validate="one_to_one",
     )
@@ -108,43 +116,105 @@ def build_category_profile(
 # Build validation dataset
 # ---------------------------------------------------------------------
 
+def build_golden_truth_bridge(
+    customer_master: pd.DataFrame,
+    identity_ground_truth: pd.DataFrame,
+    identity_resolution: pd.DataFrame,
+) -> pd.DataFrame:
+    """
+    QA-only mapping from resolved golden identities to hidden
+    synthetic persona/archetype truth.
+
+    Contaminated resolved clusters are excluded because they contain
+    more than one true synthetic person and therefore do not have a
+    single valid hidden persona/archetype label.
+    """
+    record_truth = (
+        identity_resolution[
+            ["identity_record_id", "golden_customer_id"]
+        ]
+        .merge(
+            identity_ground_truth[
+                ["identity_record_id", "golden_customer_id"]
+            ].rename(
+                columns={
+                    "golden_customer_id": "customer_id"
+                }
+            ),
+            on="identity_record_id",
+            how="left",
+            validate="one_to_one",
+        )
+    )
+
+    cluster_truth = (
+        record_truth
+        .groupby("golden_customer_id")
+        .agg(
+            true_people=("customer_id", "nunique"),
+            customer_id=("customer_id", "first"),
+        )
+        .reset_index()
+    )
+
+    clean = cluster_truth.loc[
+        cluster_truth["true_people"].eq(1)
+    ].copy()
+
+    return (
+        clean
+        .merge(
+            customer_master[
+                [
+                    "customer_id",
+                    "shopping_persona",
+                    "archetype",
+                ]
+            ],
+            on="customer_id",
+            how="left",
+            validate="many_to_one",
+        )
+        .drop(columns=["customer_id", "true_people"])
+    )
+
+
 def build_validation_data(
     customer_master: pd.DataFrame,
+    identity_ground_truth: pd.DataFrame,
+    identity_resolution: pd.DataFrame,
     transactions: pd.DataFrame,
     clustered: pd.DataFrame,
 ) -> pd.DataFrame:
 
-    truth = customer_master[
-        [
-            "customer_id",
-            "shopping_persona",
-            "archetype",
-        ]
-    ].copy()
+    truth = build_golden_truth_bridge(
+        customer_master,
+        identity_ground_truth,
+        identity_resolution,
+    )
 
-    category_profile = (
-        build_category_profile(
-            transactions
-        )
+    category_profile = build_category_profile(
+        transactions
     )
 
     validation = (
         clustered
         .merge(
             truth,
-            on="customer_id",
-            how="left",
+            on="golden_customer_id",
+            how="inner",
             validate="one_to_one",
         )
         .merge(
             category_profile,
-            on="customer_id",
+            on="golden_customer_id",
             how="left",
             validate="one_to_one",
         )
     )
 
     return validation
+
 
 
 # ---------------------------------------------------------------------
@@ -165,7 +235,7 @@ def build_cluster_profile(
         )
         .agg(
             customers=(
-                "customer_id",
+                "golden_customer_id",
                 "nunique",
             ),
             median_orders=(
@@ -513,7 +583,7 @@ def print_results(
 
     print(
         f"Customers validated: "
-        f"{validation['customer_id'].nunique():,}"
+        f"{validation['golden_customer_id'].nunique():,}"
     )
 
     print(
@@ -607,6 +677,14 @@ def main() -> None:
         CUSTOMER_MASTER_FILE
     )
 
+    identity_ground_truth = pd.read_parquet(
+        IDENTITY_GROUND_TRUTH_FILE
+    )
+
+    identity_resolution = pd.read_parquet(
+        IDENTITY_RESOLUTION_FILE
+    )
+
     transactions = pd.read_parquet(
         TRANSACTION_FILE
     )
@@ -617,6 +695,8 @@ def main() -> None:
 
     validation = build_validation_data(
         customer_master,
+        identity_ground_truth,
+        identity_resolution,
         transactions,
         clustered,
     )

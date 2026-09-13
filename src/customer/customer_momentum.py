@@ -12,11 +12,10 @@ AS_OF_DATE = pd.Timestamp("2026-07-31")
 
 WINDOW_DAYS = 180
 
-INPUT_DIR = Path("data/generated")
 RUNTIME_DIR = Path("data/runtime")
 
-CUSTOMER_FILE = INPUT_DIR / "customer_master.parquet"
-TRANSACTION_FILE = INPUT_DIR / "transactions.parquet"
+CUSTOMER_FILE = RUNTIME_DIR / "golden_customer_master.parquet"
+TRANSACTION_FILE = RUNTIME_DIR / "golden_customer_transactions.parquet"
 FEATURE_FILE = RUNTIME_DIR / "customer_features.parquet"
 
 OUTPUT_FILE = RUNTIME_DIR / "customer_momentum.parquet"
@@ -73,7 +72,7 @@ def build_period_metrics(
 
     metrics = (
         period
-        .groupby("customer_id")
+        .groupby("golden_customer_id")
         .agg(
             orders=("order_id", "nunique"),
             sales=("net_sales", "sum"),
@@ -93,7 +92,7 @@ def build_period_metrics(
     rename_columns = {
         column: f"{prefix}_{column}"
         for column in metrics.columns
-        if column != "customer_id"
+        if column != "golden_customer_id"
     }
 
     return metrics.rename(
@@ -120,14 +119,14 @@ def build_period_cadence(
                 inclusive="both",
             ),
             [
-                "customer_id",
+                "golden_customer_id",
                 "transaction_date",
             ],
         ]
         .drop_duplicates()
         .sort_values(
             [
-                "customer_id",
+                "golden_customer_id",
                 "transaction_date",
             ]
         )
@@ -135,7 +134,7 @@ def build_period_cadence(
 
     period["previous_purchase"] = (
         period
-        .groupby("customer_id")[
+        .groupby("golden_customer_id")[
             "transaction_date"
         ]
         .shift(1)
@@ -149,7 +148,7 @@ def build_period_cadence(
     cadence = (
         period
         .dropna(subset=["gap_days"])
-        .groupby("customer_id")
+        .groupby("golden_customer_id")
         .agg(
             median_gap_days=(
                 "gap_days",
@@ -238,32 +237,31 @@ def build_momentum_features(
 
     momentum = customers[
         [
-            "customer_id",
-            "acquisition_date",
+            "golden_customer_id",
         ]
     ].copy()
 
     momentum = momentum.merge(
         prior,
-        on="customer_id",
+        on="golden_customer_id",
         how="left",
     )
 
     momentum = momentum.merge(
         recent,
-        on="customer_id",
+        on="golden_customer_id",
         how="left",
     )
 
     momentum = momentum.merge(
         prior_cadence,
-        on="customer_id",
+        on="golden_customer_id",
         how="left",
     )
 
     momentum = momentum.merge(
         recent_cadence,
-        on="customer_id",
+        on="golden_customer_id",
         how="left",
     )
 
@@ -310,11 +308,36 @@ def build_momentum_features(
         momentum["prior_median_gap_days"],
     )
 
-    # Customer must have existed before the prior window ended
-    # to make the comparison reasonably meaningful.
+    # Comparable history is now based on observable behaviour:
+    # the golden customer must have at least one purchase on or before
+    # the end of the prior comparison window. This avoids relying on
+    # hidden synthetic acquisition dates.
+    first_purchase = (
+        transactions
+        .groupby("golden_customer_id")
+        .agg(
+            first_observed_purchase_date=(
+                "transaction_date",
+                "min",
+            )
+        )
+        .reset_index()
+    )
+
+    momentum = momentum.merge(
+        first_purchase,
+        on="golden_customer_id",
+        how="left",
+        validate="one_to_one",
+    )
+
     momentum["comparable_history"] = (
-        momentum["acquisition_date"]
-        <= windows["prior_end"]
+        momentum["first_observed_purchase_date"]
+        .notna()
+        & (
+            momentum["first_observed_purchase_date"]
+            <= windows["prior_end"]
+        )
     )
 
     # Stronger evidence requirement for cadence comparison.
@@ -334,7 +357,7 @@ def build_momentum_features(
 
     feature_columns = customer_features[
         [
-            "customer_id",
+            "golden_customer_id",
             "active_customer",
             "lifecycle_status",
             "days_since_last_purchase",
@@ -347,7 +370,7 @@ def build_momentum_features(
 
     momentum = momentum.merge(
         feature_columns,
-        on="customer_id",
+        on="golden_customer_id",
         how="left",
         validate="one_to_one",
     )
@@ -474,8 +497,18 @@ def run_qa(
     )
 
     print(
-        f"\nCustomers: "
+        f"\nResolved golden customers: "
         f"{len(momentum):,}"
+    )
+
+    print(
+        f"Unique golden customer IDs: "
+        f"{momentum['golden_customer_id'].nunique():,}"
+    )
+
+    print(
+        f"Duplicate golden customer IDs: "
+        f"{momentum['golden_customer_id'].duplicated().sum():,}"
     )
 
     print(
@@ -530,7 +563,7 @@ def main() -> None:
         exist_ok=True,
     )
 
-    print("Loading source data...")
+    print("Loading golden customer data...")
 
     customers = pd.read_parquet(
         CUSTOMER_FILE
@@ -544,7 +577,70 @@ def main() -> None:
         FEATURE_FILE
     )
 
-    print("Building momentum features...")
+    required_customer_columns = {
+        "golden_customer_id",
+    }
+
+    required_transaction_columns = {
+        "golden_customer_id",
+        "transaction_date",
+        "order_id",
+        "net_sales",
+        "gross_margin",
+        "units",
+    }
+
+    required_feature_columns = {
+        "golden_customer_id",
+        "active_customer",
+        "lifecycle_status",
+        "days_since_last_purchase",
+        "adjusted_lapse_ratio",
+        "cadence_confidence",
+        "trailing_12m_sales",
+        "trailing_12m_margin",
+    }
+
+    missing_customer_columns = (
+        required_customer_columns
+        - set(customers.columns)
+    )
+
+    missing_transaction_columns = (
+        required_transaction_columns
+        - set(transactions.columns)
+    )
+
+    missing_feature_columns = (
+        required_feature_columns
+        - set(customer_features.columns)
+    )
+
+    if missing_customer_columns:
+        raise ValueError(
+            "Golden customer master is missing: "
+            f"{sorted(missing_customer_columns)}"
+        )
+
+    if missing_transaction_columns:
+        raise ValueError(
+            "Golden customer transactions are missing: "
+            f"{sorted(missing_transaction_columns)}"
+        )
+
+    if missing_feature_columns:
+        raise ValueError(
+            "Customer features are missing: "
+            f"{sorted(missing_feature_columns)}"
+        )
+
+    if customers["golden_customer_id"].duplicated().any():
+        raise ValueError(
+            "Golden customer master must contain "
+            "one row per golden_customer_id."
+        )
+
+    print("Building golden customer momentum features...")
 
     momentum = build_momentum_features(
         customers,

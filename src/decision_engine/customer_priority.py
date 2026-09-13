@@ -386,7 +386,7 @@ def build_customer_priority(
 
     feature_columns = features[
         [
-            "customer_id",
+            "golden_customer_id",
             "median_purchase_gap_days",
             "expected_return_days",
             "adjusted_lapse_ratio",
@@ -396,7 +396,7 @@ def build_customer_priority(
 
     result = result.merge(
         feature_columns,
-        on="customer_id",
+        on="golden_customer_id",
         how="left",
         validate="one_to_one",
     )
@@ -404,7 +404,7 @@ def build_customer_priority(
     # Keep the descriptive 180-day period comparison.
     momentum_columns = momentum[
         [
-            "customer_id",
+            "golden_customer_id",
             "order_change_pct",
             "sales_change_pct",
             "margin_change_pct",
@@ -416,7 +416,7 @@ def build_customer_priority(
 
     result = result.merge(
         momentum_columns,
-        on="customer_id",
+        on="golden_customer_id",
         how="left",
         validate="one_to_one",
     )
@@ -424,7 +424,7 @@ def build_customer_priority(
     # Analytical cadence trend signal.
     trend_columns = cadence_trend[
         [
-            "customer_id",
+            "golden_customer_id",
             "trend_gap_count",
             "gap_trend_slope",
             "gap_trend_pct",
@@ -436,7 +436,7 @@ def build_customer_priority(
 
     result = result.merge(
         trend_columns,
-        on="customer_id",
+        on="golden_customer_id",
         how="left",
         validate="one_to_one",
     )
@@ -465,8 +465,18 @@ def run_qa(
     print("=" * 80)
 
     print(
-        f"Customers: "
+        f"Resolved golden customers: "
         f"{len(priority):,}"
+    )
+
+    print(
+        f"Unique golden customer IDs: "
+        f"{priority['golden_customer_id'].nunique():,}"
+    )
+
+    print(
+        f"Duplicate golden customer IDs: "
+        f"{priority['golden_customer_id'].duplicated().sum():,}"
     )
 
     print("\nDecision groups:")
@@ -510,7 +520,7 @@ def run_qa(
         .groupby("decision_group")
         .agg(
             customers=(
-                "customer_id",
+                "golden_customer_id",
                 "nunique",
             ),
             trailing_12m_margin=(
@@ -540,7 +550,7 @@ def run_qa(
     )
 
     display_columns = [
-        "customer_id",
+        "golden_customer_id",
         "rfm_segment",
         "customer_value_tier",
         "lifecycle_status",
@@ -593,7 +603,72 @@ def main() -> None:
         CADENCE_TREND_FILE
     )
 
-    print("Building customer priority decisions...")
+    required_inputs = {
+        "Customer value": (
+            value,
+            {
+                "golden_customer_id",
+                "commercial_value_score",
+                "customer_value_tier",
+                "rfm_segment",
+                "active_customer",
+                "lifecycle_status",
+                "trailing_12m_sales",
+                "trailing_12m_margin",
+            },
+        ),
+        "Customer features": (
+            features,
+            {
+                "golden_customer_id",
+                "median_purchase_gap_days",
+                "expected_return_days",
+                "adjusted_lapse_ratio",
+                "cadence_confidence",
+            },
+        ),
+        "Customer momentum": (
+            momentum,
+            {
+                "golden_customer_id",
+                "order_change_pct",
+                "sales_change_pct",
+                "margin_change_pct",
+                "aov_change_pct",
+                "cadence_change_pct",
+                "momentum_status",
+            },
+        ),
+        "Cadence trend": (
+            cadence_trend,
+            {
+                "golden_customer_id",
+                "trend_gap_count",
+                "gap_trend_slope",
+                "gap_trend_pct",
+                "gap_trend_r_squared",
+                "recent_vs_early_gap_pct",
+                "cadence_trend_status",
+            },
+        ),
+    }
+
+    for label, (frame, required) in required_inputs.items():
+        missing = required - set(frame.columns)
+
+        if missing:
+            raise ValueError(
+                f"{label} is missing required columns: "
+                f"{sorted(missing)}"
+            )
+
+        if frame["golden_customer_id"].duplicated().any():
+            raise ValueError(
+                f"{label} must contain one row per "
+                "golden_customer_id."
+            )
+
+    print("Building golden customer priority decisions...")
 
     priority = build_customer_priority(
         value,

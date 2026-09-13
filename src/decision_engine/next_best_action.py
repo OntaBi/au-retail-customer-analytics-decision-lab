@@ -11,8 +11,13 @@ import pandas as pd
 PRIORITY_FILE = Path("data/runtime/customer_priority.parquet")
 LTV_FILE = Path("data/runtime/customer_ltv.parquet")
 CLUSTER_FILE = Path("data/runtime/customer_clusters.parquet")
-TRANSACTION_FILE = Path("data/generated/transactions.parquet")
+TRANSACTION_FILE = Path("data/runtime/golden_customer_transactions.parquet")
 OUTPUT_FILE = Path("data/runtime/customer_next_best_action.parquet")
+CROSS_SELL_SCORE_FILE = Path("data/runtime/cross_sell_model_scores.parquet")
+CROSS_SELL_RECOMMENDATION_FILE = Path("data/runtime/cross_sell_category_recommendations.parquet")
+CROSS_SELL_GOVERNANCE_FILE = Path("data/runtime/cross_sell_model_governance.parquet")
+PROMOTION_SCORE_FILE = Path("data/runtime/promotion_response_operational_scores.parquet")
+PROMOTION_GOVERNANCE_FILE = Path("data/runtime/promotion_response_model_governance.parquet")
 
 CANDIDATE_ACTIONS = [
     "Protect",
@@ -68,7 +73,7 @@ def build_transaction_behaviour(transactions: pd.DataFrame) -> pd.DataFrame:
     tx["discounted_order"] = tx["discount_pct"].fillna(0).gt(0)
 
     base = (
-        tx.groupby("customer_id")
+        tx.groupby("golden_customer_id")
         .agg(
             observed_orders_tx=("order_id", "nunique"),
             observed_sales_tx=("net_sales", "sum"),
@@ -88,7 +93,7 @@ def build_transaction_behaviour(transactions: pd.DataFrame) -> pd.DataFrame:
     )
 
     category_counts = (
-        tx.groupby(["customer_id", "category"])
+        tx.groupby(["golden_customer_id", "category"])
         .agg(
             category_orders=("order_id", "nunique"),
             category_margin=("gross_margin", "sum"),
@@ -97,7 +102,7 @@ def build_transaction_behaviour(transactions: pd.DataFrame) -> pd.DataFrame:
     )
 
     category_counts["total_category_orders"] = (
-        category_counts.groupby("customer_id")["category_orders"].transform("sum")
+        category_counts.groupby("golden_customer_id")["category_orders"].transform("sum")
     )
     category_counts["category_order_share"] = safe_divide(
         category_counts["category_orders"],
@@ -106,11 +111,11 @@ def build_transaction_behaviour(transactions: pd.DataFrame) -> pd.DataFrame:
 
     dominant_category = (
         category_counts.sort_values(
-            ["customer_id", "category_order_share", "category_margin"],
+            ["golden_customer_id", "category_order_share", "category_margin"],
             ascending=[True, False, False],
         )
-        .drop_duplicates("customer_id")
-        [["customer_id", "category", "category_order_share"]]
+        .drop_duplicates("golden_customer_id")
+        [["golden_customer_id", "category", "category_order_share"]]
         .rename(
             columns={
                 "category": "dominant_category",
@@ -120,12 +125,12 @@ def build_transaction_behaviour(transactions: pd.DataFrame) -> pd.DataFrame:
     )
 
     channel_counts = (
-        tx.groupby(["customer_id", "channel"])
+        tx.groupby(["golden_customer_id", "channel"])
         .agg(channel_orders=("order_id", "nunique"))
         .reset_index()
     )
     channel_counts["total_channel_orders"] = (
-        channel_counts.groupby("customer_id")["channel_orders"].transform("sum")
+        channel_counts.groupby("golden_customer_id")["channel_orders"].transform("sum")
     )
     channel_counts["channel_order_share"] = safe_divide(
         channel_counts["channel_orders"],
@@ -134,11 +139,11 @@ def build_transaction_behaviour(transactions: pd.DataFrame) -> pd.DataFrame:
 
     preferred_channel = (
         channel_counts.sort_values(
-            ["customer_id", "channel_order_share"],
+            ["golden_customer_id", "channel_order_share"],
             ascending=[True, False],
         )
-        .drop_duplicates("customer_id")
-        [["customer_id", "channel", "channel_order_share"]]
+        .drop_duplicates("golden_customer_id")
+        [["golden_customer_id", "channel", "channel_order_share"]]
         .rename(
             columns={
                 "channel": "preferred_channel",
@@ -148,8 +153,8 @@ def build_transaction_behaviour(transactions: pd.DataFrame) -> pd.DataFrame:
     )
 
     return (
-        base.merge(dominant_category, on="customer_id", how="left", validate="one_to_one")
-        .merge(preferred_channel, on="customer_id", how="left", validate="one_to_one")
+        base.merge(dominant_category, on="golden_customer_id", how="left", validate="one_to_one")
+        .merge(preferred_channel, on="golden_customer_id", how="left", validate="one_to_one")
     )
 
 
@@ -162,11 +167,16 @@ def build_nba_features(
     customer_ltv: pd.DataFrame,
     clusters: pd.DataFrame,
     transaction_behaviour: pd.DataFrame,
+    cross_sell_scores: pd.DataFrame | None = None,
+    cross_sell_recommendations: pd.DataFrame | None = None,
+    cross_sell_model_accepted: bool = False,
+    promotion_scores: pd.DataFrame | None = None,
+    promotion_model_accepted: bool = False,
 ) -> pd.DataFrame:
     result = priority.copy()
 
     ltv_cols = [
-        "customer_id",
+        "golden_customer_id",
         "observed_ltv_sales",
         "observed_ltv_margin",
         "observed_margin_rate",
@@ -182,22 +192,22 @@ def build_nba_features(
     ltv_cols = [c for c in ltv_cols if c in customer_ltv.columns]
     result = result.merge(
         customer_ltv[ltv_cols],
-        on="customer_id",
+        on="golden_customer_id",
         how="left",
         validate="one_to_one",
     )
 
-    cluster_cols = [c for c in ["customer_id", "cluster_name"] if c in clusters.columns]
+    cluster_cols = [c for c in ["golden_customer_id", "cluster_name"] if c in clusters.columns]
     result = result.merge(
-        clusters[cluster_cols].drop_duplicates("customer_id"),
-        on="customer_id",
+        clusters[cluster_cols].drop_duplicates("golden_customer_id"),
+        on="golden_customer_id",
         how="left",
         validate="one_to_one",
     )
 
     result = result.merge(
         transaction_behaviour,
-        on="customer_id",
+        on="golden_customer_id",
         how="left",
         validate="one_to_one",
     )
@@ -242,6 +252,186 @@ def build_nba_features(
     result.loc[low_recent, "expected_baseline_sales"] = (
         result.loc[low_recent, "average_order_value_tx"].fillna(0)
     )
+
+    # Governed cross-sell model evidence. The model is advisory only when
+    # its governance artefact says ACCEPTED; otherwise the existing
+    # transparent rule-based cross-sell pathway remains in force.
+    result["cross_sell_model_accepted"] = bool(cross_sell_model_accepted)
+    result["cross_sell_propensity"] = np.nan
+    result["cross_sell_propensity_source"] = "Rule-based fallback"
+    result["recommended_cross_sell_category"] = pd.NA
+    result["cross_sell_category_confidence"] = pd.NA
+    result["cross_sell_category_affinity"] = np.nan
+
+    if cross_sell_scores is not None and not cross_sell_scores.empty:
+        scores = cross_sell_scores.copy()
+        id_col = "golden_customer_id"
+        probability_candidates = [
+            "cross_sell_propensity_180d",
+            "calibrated_probability",
+            "cross_sell_propensity",
+            "predicted_probability",
+            "probability",
+        ]
+        probability_col = next(
+            (c for c in probability_candidates if c in scores.columns),
+            None,
+        )
+        if id_col in scores.columns and probability_col is not None:
+            score_subset = (
+                scores[[id_col, probability_col]]
+                .dropna(subset=[id_col])
+                .drop_duplicates(id_col, keep="last")
+                .rename(columns={probability_col: "_cross_sell_model_probability"})
+            )
+            result = result.merge(
+                score_subset,
+                on=id_col,
+                how="left",
+                validate="one_to_one",
+            )
+            if cross_sell_model_accepted:
+                result["cross_sell_propensity"] = (
+                    pd.to_numeric(
+                        result["_cross_sell_model_probability"],
+                        errors="coerce",
+                    )
+                    .clip(0, 1)
+                )
+                result.loc[
+                    result["cross_sell_propensity"].notna(),
+                    "cross_sell_propensity_source",
+                ] = "Accepted governed model"
+            result = result.drop(
+                columns=["_cross_sell_model_probability"],
+                errors="ignore",
+            )
+
+    if cross_sell_recommendations is not None and not cross_sell_recommendations.empty:
+        recs = cross_sell_recommendations.copy()
+        rename_map = {}
+        for candidate in ["recommended_category", "top_category", "category"]:
+            if candidate in recs.columns:
+                rename_map[candidate] = "recommended_cross_sell_category"
+                break
+        for candidate in [
+            "recommendation_confidence",
+            "category_confidence",
+            "confidence",
+        ]:
+            if candidate in recs.columns:
+                rename_map[candidate] = "cross_sell_category_confidence"
+                break
+        for candidate in [
+            "affinity_score",
+            "category_affinity",
+            "recommendation_score",
+        ]:
+            if candidate in recs.columns:
+                rename_map[candidate] = "cross_sell_category_affinity"
+                break
+
+        keep = ["golden_customer_id"] + list(rename_map)
+        if "golden_customer_id" in recs.columns and rename_map:
+            rec_subset = (
+                recs[keep]
+                .rename(columns=rename_map)
+                .drop_duplicates("golden_customer_id", keep="last")
+            )
+            # Avoid collisions with the placeholder columns already created.
+            for col in [
+                "recommended_cross_sell_category",
+                "cross_sell_category_confidence",
+                "cross_sell_category_affinity",
+            ]:
+                if col in rec_subset.columns:
+                    mapper = rec_subset.set_index("golden_customer_id")[col]
+                    result[col] = result["golden_customer_id"].map(mapper)
+
+    # Governed promotion-response model evidence. Only an ACCEPTED model
+    # may replace the transparent promotion-response fallback used by NBA.
+    result["promotion_model_accepted"] = bool(promotion_model_accepted)
+    result["promotion_response_propensity"] = np.nan
+    result["promotion_propensity_source"] = "Decision-engine fallback"
+    result["recommended_campaign_channel"] = pd.NA
+    result["recommended_discount_depth"] = np.nan
+    result["recommended_offer_category"] = pd.NA
+    result["promotion_response_band"] = pd.NA
+
+    if promotion_scores is not None and not promotion_scores.empty:
+        scores = promotion_scores.copy()
+        id_col = "golden_customer_id"
+
+        probability_candidates = [
+            "promotion_response_propensity",
+            "response_propensity",
+            "calibrated_probability",
+            "predicted_probability",
+            "probability",
+        ]
+        probability_col = next(
+            (c for c in probability_candidates if c in scores.columns),
+            None,
+        )
+
+        rename_candidates = {
+            "campaign_channel": "recommended_campaign_channel",
+            "recommended_campaign_channel": "recommended_campaign_channel",
+            "discount_depth": "recommended_discount_depth",
+            "recommended_discount_depth": "recommended_discount_depth",
+            "offer_category": "recommended_offer_category",
+            "recommended_offer_category": "recommended_offer_category",
+            "promotion_response_band": "promotion_response_band",
+            "response_band": "promotion_response_band",
+        }
+
+        if id_col in scores.columns:
+            keep = [id_col]
+            rename_map = {}
+
+            if probability_col is not None:
+                keep.append(probability_col)
+                rename_map[probability_col] = "_promotion_model_probability"
+
+            for source_col, target_col in rename_candidates.items():
+                if source_col in scores.columns and source_col not in keep:
+                    # Keep the first available source for each target.
+                    if target_col not in rename_map.values():
+                        keep.append(source_col)
+                        rename_map[source_col] = target_col
+
+            score_subset = (
+                scores[keep]
+                .dropna(subset=[id_col])
+                .drop_duplicates(id_col, keep="last")
+                .rename(columns=rename_map)
+            )
+
+            # Map rather than merge so placeholder columns remain stable.
+            score_subset = score_subset.set_index(id_col)
+
+            if "_promotion_model_probability" in score_subset.columns:
+                mapped = result[id_col].map(
+                    score_subset["_promotion_model_probability"]
+                )
+                if promotion_model_accepted:
+                    result["promotion_response_propensity"] = (
+                        pd.to_numeric(mapped, errors="coerce")
+                        .clip(0, 1)
+                    )
+                    result.loc[
+                        result["promotion_response_propensity"].notna(),
+                        "promotion_propensity_source",
+                    ] = "Accepted governed model"
+
+            for col in [
+                "recommended_campaign_channel",
+                "recommended_discount_depth",
+                "recommended_offer_category",
+                "promotion_response_band",
+            ]:
+                if col in score_subset.columns:
+                    result[col] = result[id_col].map(score_subset[col])
 
     return result
 
@@ -403,21 +593,43 @@ def add_action_scores(customers: pd.DataFrame) -> pd.DataFrame:
         + 0.20 * (1 - result["risk_intensity"])
     )
 
-    result["score_cross_sell"] = 100 * (
+    rule_cross_sell_score = (
         0.20 * active.astype(float)
         + 0.20 * meaningful_value.astype(float)
         + 0.30 * result["category_headroom_score"]
         + 0.15 * repeat.astype(float)
-        + 0.15 * (
-            1 - result["dominant_category_share"]
-        )
+        + 0.15 * (1 - result["dominant_category_share"])
     )
 
-    result["score_promote"] = 100 * (
+    governed_propensity = result["cross_sell_propensity"].fillna(rule_cross_sell_score)
+    use_governed_propensity = (
+        result["cross_sell_model_accepted"].fillna(False)
+        & result["cross_sell_propensity"].notna()
+    )
+
+    result["score_cross_sell"] = 100 * np.where(
+        use_governed_propensity,
+        0.60 * governed_propensity + 0.40 * rule_cross_sell_score,
+        rule_cross_sell_score,
+    )
+
+    rule_promote_score = (
         0.50 * result["promo_responsiveness_score"]
         + 0.15 * active.astype(float)
         + 0.15 * (1 - result["risk_intensity"])
         + 0.20 * meaningful_value.astype(float)
+    )
+
+    use_governed_promotion = (
+        result["promotion_model_accepted"].fillna(False)
+        & result["promotion_response_propensity"].notna()
+    )
+
+    result["score_promote"] = 100 * np.where(
+        use_governed_promotion,
+        0.60 * result["promotion_response_propensity"]
+        + 0.40 * rule_promote_score,
+        rule_promote_score,
     )
 
     result["score_do_nothing"] = 100 * (
@@ -485,13 +697,29 @@ def calculate_action_economics(customers: pd.DataFrame) -> pd.DataFrame:
         response_probability = ACTION_RESPONSE_BASE[action] * (0.60 + 0.80 * strength)
 
         if action == "Promote":
-            response_probability = response_probability * (
+            rule_response_probability = response_probability * (
                 0.70 + result["promo_responsiveness_score"]
+            )
+            governed_mask = (
+                result["promotion_model_accepted"].fillna(False)
+                & result["promotion_response_propensity"].notna()
+            )
+            response_probability = rule_response_probability.where(
+                ~governed_mask,
+                result["promotion_response_propensity"],
             )
 
         if action == "Cross-sell":
-            response_probability = response_probability * (
+            rule_response_probability = response_probability * (
                 0.70 + result["category_headroom_score"]
+            )
+            governed_mask = (
+                result["cross_sell_model_accepted"].fillna(False)
+                & result["cross_sell_propensity"].notna()
+            )
+            response_probability = rule_response_probability.where(
+                ~governed_mask,
+                result["cross_sell_propensity"],
             )
 
         response_probability = response_probability.clip(0, 0.80)
@@ -879,14 +1107,57 @@ def build_rationale(row: pd.Series) -> str:
             "and deepen engagement before risk increases."
         )
     if action == "Cross-sell":
+        recommended_category = row.get("recommended_cross_sell_category")
+        propensity = row.get("cross_sell_propensity")
+        model_used = (
+            bool(row.get("cross_sell_model_accepted", False))
+            and pd.notna(propensity)
+        )
+        if pd.notna(recommended_category):
+            model_phrase = (
+                f" Governed 180-day cross-sell propensity is {float(propensity):.1%}."
+                if model_used else ""
+            )
+            return (
+                f"Active customer with category expansion opportunity. Current behaviour "
+                f"is concentrated around {category}; recommended adjacent category is "
+                f"{recommended_category}.{model_phrase}"
+            )
         return (
             f"Active customer with category expansion opportunity. Current behaviour "
             f"is concentrated around {category}; test a relevant adjacent category."
         )
     if action == "Promote":
+        propensity = row.get("promotion_response_propensity")
+        model_used = (
+            bool(row.get("promotion_model_accepted", False))
+            and pd.notna(propensity)
+        )
+        campaign_channel = row.get("recommended_campaign_channel")
+        discount_depth = row.get("recommended_discount_depth")
+        offer_category = row.get("recommended_offer_category")
+
+        chosen_channel = (
+            campaign_channel
+            if pd.notna(campaign_channel)
+            else channel
+        )
+        model_phrase = (
+            f" Governed promotion-response propensity is {float(propensity):.1%}."
+            if model_used else ""
+        )
+        offer_phrase = ""
+        if pd.notna(offer_category):
+            offer_phrase += f" Target {offer_category}."
+        if pd.notna(discount_depth):
+            depth = float(discount_depth)
+            depth_pct = depth * 100 if depth <= 1 else depth
+            offer_phrase += f" Recommended discount depth is {depth_pct:.0f}%."
+
         return (
-            f"Customer has above-average promotion responsiveness and positive "
-            f"intervention economics. Use targeted, margin-controlled activity via {channel}."
+            f"Customer has positive promotion-response evidence and intervention economics."
+            f"{model_phrase} Use targeted, margin-controlled activity via "
+            f"{chosen_channel}.{offer_phrase}"
         )
     return (
         "No intervention currently clears the commercial threshold. Retain the customer "
@@ -915,6 +1186,11 @@ def build_next_best_action(
     customer_ltv: pd.DataFrame,
     clusters: pd.DataFrame,
     transactions: pd.DataFrame,
+    cross_sell_scores: pd.DataFrame | None = None,
+    cross_sell_recommendations: pd.DataFrame | None = None,
+    cross_sell_model_accepted: bool = False,
+    promotion_scores: pd.DataFrame | None = None,
+    promotion_model_accepted: bool = False,
 ) -> pd.DataFrame:
     transaction_behaviour = build_transaction_behaviour(transactions)
     nba = build_nba_features(
@@ -922,6 +1198,11 @@ def build_next_best_action(
         customer_ltv,
         clusters,
         transaction_behaviour,
+        cross_sell_scores=cross_sell_scores,
+        cross_sell_recommendations=cross_sell_recommendations,
+        cross_sell_model_accepted=cross_sell_model_accepted,
+        promotion_scores=promotion_scores,
+        promotion_model_accepted=promotion_model_accepted,
     )
     nba = add_action_scores(nba)
     nba = calculate_action_economics(nba)
@@ -937,7 +1218,16 @@ def build_next_best_action(
 def run_qa(nba: pd.DataFrame) -> None:
     print("\nNEXT BEST ACTION QA")
     print("=" * 80)
-    print(f"Customers: {len(nba):,}")
+    print(f"Resolved golden customers: {len(nba):,}")
+
+    print(
+        f"Unique golden customer IDs: "
+        f"{nba['golden_customer_id'].nunique():,}"
+    )
+    print(
+        f"Duplicate golden customer IDs: "
+        f"{nba['golden_customer_id'].duplicated().sum():,}"
+    )
 
     print("\nRecommended actions:")
     print(nba["recommended_action_nba"].value_counts(dropna=False))
@@ -946,7 +1236,7 @@ def run_qa(nba: pd.DataFrame) -> None:
     economics = (
         nba.groupby("recommended_action_nba")
         .agg(
-            customers=("customer_id", "nunique"),
+            customers=("golden_customer_id", "nunique"),
             expected_incremental_sales=("expected_incremental_sales", "sum"),
             expected_incremental_margin=("expected_incremental_margin", "sum"),
             median_confidence=("recommendation_confidence", "median"),
@@ -964,7 +1254,7 @@ def run_qa(nba: pd.DataFrame) -> None:
 
     print("\nTop 10 recommendations:")
     display_columns = [
-        "customer_id",
+        "golden_customer_id",
         "cluster_name",
         "customer_value_tier",
         "lifecycle_status",
@@ -986,6 +1276,56 @@ def run_qa(nba: pd.DataFrame) -> None:
 
 
 # ---------------------------------------------------------------------
+# Governed propensity inputs
+# ---------------------------------------------------------------------
+
+def load_cross_sell_model_status() -> bool:
+    if not CROSS_SELL_GOVERNANCE_FILE.exists():
+        return False
+
+    governance = pd.read_parquet(CROSS_SELL_GOVERNANCE_FILE)
+    if governance.empty:
+        return False
+
+    for column in ["final_model_status", "model_status", "status"]:
+        if column in governance.columns:
+            values = governance[column].astype(str).str.upper()
+            return values.eq("ACCEPTED").any()
+
+    # Support the governance table produced by the modelling workflow where
+    # every gate is recorded explicitly.
+    if "pass" in governance.columns:
+        passed = governance["pass"]
+        if passed.dtype != bool:
+            passed = passed.astype(str).str.lower().isin(["true", "1", "yes"])
+        return bool(passed.all())
+
+    return False
+
+
+def load_promotion_model_status() -> bool:
+    if not PROMOTION_GOVERNANCE_FILE.exists():
+        return False
+
+    governance = pd.read_parquet(PROMOTION_GOVERNANCE_FILE)
+    if governance.empty:
+        return False
+
+    for column in ["final_model_status", "model_status", "status"]:
+        if column in governance.columns:
+            values = governance[column].astype(str).str.upper()
+            return values.eq("ACCEPTED").any()
+
+    if "pass" in governance.columns:
+        passed = governance["pass"]
+        if passed.dtype != bool:
+            passed = passed.astype(str).str.lower().isin(["true", "1", "yes"])
+        return bool(passed.all())
+
+    return False
+
+
+# ---------------------------------------------------------------------
 # Main
 # ---------------------------------------------------------------------
 
@@ -998,12 +1338,104 @@ def main() -> None:
     clusters = pd.read_parquet(CLUSTER_FILE)
     transactions = pd.read_parquet(TRANSACTION_FILE)
 
-    print("Building Next Best Action recommendations...")
+    cross_sell_model_accepted = load_cross_sell_model_status()
+    cross_sell_scores = (
+        pd.read_parquet(CROSS_SELL_SCORE_FILE)
+        if CROSS_SELL_SCORE_FILE.exists()
+        else None
+    )
+    cross_sell_recommendations = (
+        pd.read_parquet(CROSS_SELL_RECOMMENDATION_FILE)
+        if CROSS_SELL_RECOMMENDATION_FILE.exists()
+        else None
+    )
+
+    promotion_model_accepted = load_promotion_model_status()
+    promotion_scores = (
+        pd.read_parquet(PROMOTION_SCORE_FILE)
+        if PROMOTION_SCORE_FILE.exists()
+        else None
+    )
+
+    print(
+        "Cross-sell governed model status: "
+        f"{'ACCEPTED' if cross_sell_model_accepted else 'FALLBACK / NOT ACCEPTED'}"
+    )
+    print(
+        "Promotion-response governed model status: "
+        f"{'ACCEPTED' if promotion_model_accepted else 'FALLBACK / NOT ACCEPTED'}"
+    )
+
+    required_inputs = {
+        "Customer priority": (
+            priority,
+            {
+                "golden_customer_id",
+                "customer_value_tier",
+                "rfm_segment",
+                "active_customer",
+                "lifecycle_status",
+                "cadence_trend_status",
+                "cadence_confidence",
+                "trailing_12m_sales",
+                "trailing_12m_margin",
+                "value_score",
+                "lapse_risk_score",
+                "momentum_risk_score",
+            },
+        ),
+        "Customer LTV": (
+            customer_ltv,
+            {"golden_customer_id"},
+        ),
+        "Customer clusters": (
+            clusters,
+            {"golden_customer_id"},
+        ),
+        "Golden customer transactions": (
+            transactions,
+            {
+                "golden_customer_id",
+                "order_id",
+                "net_sales",
+                "gross_margin",
+                "discount_pct",
+                "category",
+                "channel",
+            },
+        ),
+    }
+
+    for label, (frame, required) in required_inputs.items():
+        missing = required - set(frame.columns)
+        if missing:
+            raise ValueError(
+                f"{label} is missing required columns: "
+                f"{sorted(missing)}"
+            )
+
+    for label, frame in [
+        ("Customer priority", priority),
+        ("Customer LTV", customer_ltv),
+        ("Customer clusters", clusters),
+    ]:
+        if frame["golden_customer_id"].duplicated().any():
+            raise ValueError(
+                f"{label} must contain one row per "
+                "golden_customer_id."
+            )
+
+    print("Building golden-customer Next Best Action recommendations...")
     nba = build_next_best_action(
         priority,
         customer_ltv,
         clusters,
         transactions,
+        cross_sell_scores=cross_sell_scores,
+        cross_sell_recommendations=cross_sell_recommendations,
+        cross_sell_model_accepted=cross_sell_model_accepted,
+        promotion_scores=promotion_scores,
+        promotion_model_accepted=promotion_model_accepted,
     )
 
     nba.to_parquet(OUTPUT_FILE, index=False)

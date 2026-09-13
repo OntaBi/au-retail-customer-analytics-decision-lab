@@ -82,6 +82,30 @@ def load_data() -> pd.DataFrame:
             "No dominant category",
         "preferred_channel":
             "No clear channel",
+        "cross_sell_model_accepted":
+            False,
+        "cross_sell_propensity":
+            np.nan,
+        "cross_sell_propensity_source":
+            "Decision-engine fallback",
+        "recommended_cross_sell_category":
+            "No category recommendation",
+        "cross_sell_category_confidence":
+            "Not available",
+        "promotion_model_accepted":
+            False,
+        "promotion_response_propensity":
+            np.nan,
+        "promotion_propensity_source":
+            "Decision-engine fallback",
+        "recommended_campaign_channel":
+            "No campaign channel",
+        "recommended_discount_depth":
+            np.nan,
+        "recommended_offer_category":
+            "No offer category",
+        "promotion_response_band":
+            "Not available",
     }
 
     for column, default in required_defaults.items():
@@ -116,7 +140,7 @@ st.title(
 
 st.caption(
     "Synthetic Australian retail customer scenario | "
-    "20,000 customers | Behaviour → Cadence → Value → Decision"
+    "Resolved Golden Customers | Behaviour → Cadence → Value → Decision"
 )
 
 st.header(
@@ -331,6 +355,46 @@ st.caption(
 
 
 # ---------------------------------------------------------------------
+# Decision intelligence governance
+# ---------------------------------------------------------------------
+
+st.subheader("Decision intelligence governance")
+
+cross_sell_accepted = bool(
+    nba["cross_sell_model_accepted"].fillna(False).any()
+)
+promotion_accepted = bool(
+    nba["promotion_model_accepted"].fillna(False).any()
+)
+
+gov1, gov2, gov3 = st.columns(3)
+
+gov1.metric(
+    "Cross-sell Propensity",
+    "Accepted" if cross_sell_accepted else "Fallback",
+)
+gov2.metric(
+    "Promotion Response",
+    "Accepted" if promotion_accepted else "Fallback",
+)
+gov3.metric(
+    "Re-engagement Propensity",
+    "Rejected → Rules",
+)
+
+st.info(
+    "Accepted propensity models inform customer decisioning. "
+    "Rejected models automatically fall back to governed decision rules."
+)
+
+st.caption(
+    "Accepted models inform action relevance and/or response probability; "
+    "customer eligibility and positive expected incremental economics remain "
+    "mandatory before an intervention is recommended."
+)
+
+
+# ---------------------------------------------------------------------
 # Action mix and economics
 # ---------------------------------------------------------------------
 
@@ -348,7 +412,7 @@ action_summary = (
     )
     .agg(
         customers=(
-            "customer_id",
+            "golden_customer_id",
             "nunique",
         ),
         expected_incremental_margin=(
@@ -581,7 +645,7 @@ recommendation_map = px.scatter(
             ACTION_ORDER
     },
     hover_data={
-        "customer_id":
+        "golden_customer_id":
             True,
         "cluster_name":
             True,
@@ -627,6 +691,79 @@ st.plotly_chart(
     recommendation_map,
     use_container_width=True,
 )
+
+
+# ---------------------------------------------------------------------
+# Model evidence helpers
+# ---------------------------------------------------------------------
+
+def decision_intelligence_source(row: pd.Series) -> str:
+    action = str(row.get("recommended_action_nba", "Do Nothing"))
+
+    if (
+        action == "Cross-sell"
+        and bool(row.get("cross_sell_model_accepted", False))
+        and pd.notna(row.get("cross_sell_propensity"))
+    ):
+        return "Model-informed"
+
+    if (
+        action == "Promote"
+        and bool(row.get("promotion_model_accepted", False))
+        and pd.notna(row.get("promotion_response_propensity"))
+    ):
+        return "Model-informed"
+
+    if action == "Re-engage":
+        return "Rules-informed"
+
+    return "Decision rules"
+
+
+def action_propensity(row: pd.Series):
+    action = str(row.get("recommended_action_nba", "Do Nothing"))
+
+    if action == "Cross-sell":
+        value = row.get("cross_sell_propensity")
+        return float(value) if pd.notna(value) else np.nan
+
+    if action == "Promote":
+        value = row.get("promotion_response_propensity")
+        return float(value) if pd.notna(value) else np.nan
+
+    return np.nan
+
+
+def action_treatment(row: pd.Series) -> str:
+    action = str(row.get("recommended_action_nba", "Do Nothing"))
+
+    if action == "Cross-sell":
+        category = row.get("recommended_cross_sell_category")
+        if pd.notna(category) and str(category).strip():
+            return f"Category: {category}"
+        return "Cross-sell opportunity"
+
+    if action == "Promote":
+        pieces = []
+        category = row.get("recommended_offer_category")
+        channel = row.get("recommended_campaign_channel")
+        depth = row.get("recommended_discount_depth")
+
+        if pd.notna(category) and str(category).strip():
+            pieces.append(str(category))
+        if pd.notna(channel) and str(channel).strip():
+            pieces.append(str(channel))
+        if pd.notna(depth):
+            depth = float(depth)
+            depth_pct = depth * 100 if depth <= 1 else depth
+            pieces.append(f"{depth_pct:.0f}%")
+
+        return " | ".join(pieces) if pieces else "Promotion opportunity"
+
+    if action == "Re-engage":
+        return "Behavioural rules fallback"
+
+    return str(row.get("primary_driver", "Decision rules"))
 
 
 # ---------------------------------------------------------------------
@@ -680,22 +817,52 @@ if queue.empty:
 
 else:
 
+    queue["decision_intelligence"] = queue.apply(
+        decision_intelligence_source,
+        axis=1,
+    )
+    queue["action_propensity"] = queue.apply(
+        action_propensity,
+        axis=1,
+    )
+    queue["treatment_evidence"] = queue.apply(
+        action_treatment,
+        axis=1,
+    )
+
     queue_display = (
         queue[
             [
-                "customer_id",
+                "golden_customer_id",
                 "cluster_name",
                 "customer_value_tier",
                 "lifecycle_status",
                 "recommended_action_nba",
+                "decision_intelligence",
+                "action_propensity",
                 "recommendation_confidence",
                 "expected_incremental_margin",
                 "response_probability",
+                "treatment_evidence",
                 "primary_driver",
                 "alternative_action",
             ]
         ]
         .copy()
+    )
+
+    queue_display[
+        "action_propensity"
+    ] = (
+        queue_display[
+            "action_propensity"
+        ]
+        .map(
+            lambda x:
+                f"{x:.1%}"
+                if pd.notna(x)
+                else "—"
+        )
     )
 
     queue_display[
@@ -737,7 +904,7 @@ else:
     queue_display = (
         queue_display.rename(
             columns={
-                "customer_id":
+                "golden_customer_id":
                     "Customer",
                 "cluster_name":
                     "Customer Segment",
@@ -747,6 +914,12 @@ else:
                     "Lifecycle",
                 "recommended_action_nba":
                     "Next Best Action",
+                "decision_intelligence":
+                    "Decision Intelligence",
+                "action_propensity":
+                    "Propensity",
+                "treatment_evidence":
+                    "Treatment Evidence",
                 "recommendation_confidence":
                     "Confidence",
                 "expected_incremental_margin":
@@ -778,7 +951,7 @@ st.subheader(
 
 explorer_candidates = (
     queue[
-        "customer_id"
+        "golden_customer_id"
     ]
     .astype(str)
     .tolist()
@@ -788,7 +961,7 @@ if not explorer_candidates:
 
     explorer_candidates = (
         page_df[
-            "customer_id"
+            "golden_customer_id"
         ]
         .astype(str)
         .tolist()
@@ -796,7 +969,7 @@ if not explorer_candidates:
 
 selected_customer = (
     st.selectbox(
-        "Customer",
+        "Golden Customer",
         options=explorer_candidates,
         index=0,
     )
@@ -805,7 +978,7 @@ selected_customer = (
 customer = (
     page_df.loc[
         page_df[
-            "customer_id"
+            "golden_customer_id"
         ]
         .astype(str)
         .eq(
@@ -854,6 +1027,55 @@ st.info(
         "recommendation_rationale"
     ]
 )
+
+customer_intelligence = decision_intelligence_source(customer)
+customer_propensity = action_propensity(customer)
+customer_treatment = action_treatment(customer)
+
+st.markdown("**Decision intelligence**")
+
+intel1, intel2, intel3 = st.columns(3)
+
+intel1.metric(
+    "Decision Source",
+    customer_intelligence,
+)
+
+intel2.metric(
+    "Relevant Propensity",
+    f"{customer_propensity:.1%}"
+    if pd.notna(customer_propensity)
+    else "Not applicable",
+)
+
+intel3.metric(
+    "Treatment / Opportunity",
+    customer_treatment,
+)
+
+if customer["recommended_action_nba"] == "Cross-sell":
+    st.caption(
+        "Cross-sell is informed by the governance-accepted 180-day propensity "
+        "model and category recommendation layer. The action still requires "
+        "positive expected incremental margin."
+    )
+elif customer["recommended_action_nba"] == "Promote":
+    st.caption(
+        "Promotion is informed by the governance-accepted 30-day promotion "
+        "response model. Campaign treatment evidence is used alongside "
+        "commercial economics before activation."
+    )
+elif customer["recommended_action_nba"] == "Re-engage":
+    st.caption(
+        "Re-engagement remains rules-informed because the propensity model "
+        "failed its governance thresholds. The rejected model is not used "
+        "for operational customer decisioning."
+    )
+else:
+    st.caption(
+        "This action is driven by transparent customer-value, lifecycle, "
+        "behavioural-risk and commercial decision rules."
+    )
 
 
 detail1, detail2, detail3 = (
@@ -939,6 +1161,51 @@ with detail3:
         f"**Expected Incremental Sales:** "
         f"${customer['expected_incremental_sales']:,.0f}"
     )
+
+    if customer["recommended_action_nba"] == "Cross-sell":
+        category = customer.get(
+            "recommended_cross_sell_category",
+            "No category recommendation",
+        )
+        confidence = customer.get(
+            "cross_sell_category_confidence",
+            "Not available",
+        )
+        st.write(f"**Recommended Category:** {category}")
+        st.write(f"**Category Confidence:** {confidence}")
+
+    if customer["recommended_action_nba"] == "Promote":
+        campaign_channel = customer.get(
+            "recommended_campaign_channel",
+            "No campaign channel",
+        )
+        offer_category = customer.get(
+            "recommended_offer_category",
+            "No offer category",
+        )
+        response_band = customer.get(
+            "promotion_response_band",
+            "Not available",
+        )
+        discount_depth = customer.get(
+            "recommended_discount_depth",
+            np.nan,
+        )
+
+        st.write(f"**Campaign Channel:** {campaign_channel}")
+        st.write(f"**Offer Category:** {offer_category}")
+        st.write(f"**Response Band:** {response_band}")
+
+        if pd.notna(discount_depth):
+            discount_depth = float(discount_depth)
+            discount_pct = (
+                discount_depth * 100
+                if discount_depth <= 1
+                else discount_depth
+            )
+            st.write(
+                f"**Recommended Discount:** {discount_pct:.0f}%"
+            )
 
 
 # ---------------------------------------------------------------------
@@ -1037,7 +1304,7 @@ summary_table = (
     )
     .agg(
         customers=(
-            "customer_id",
+            "golden_customer_id",
             "nunique",
         ),
         expected_incremental_sales=(
@@ -1146,13 +1413,25 @@ st.subheader(
 )
 
 export_columns = [
-    "customer_id",
+    "golden_customer_id",
     "cluster_name",
     "customer_value_tier",
     "lifecycle_status",
     "recommended_action_nba",
     "recommendation_confidence",
     "response_probability",
+    "cross_sell_model_accepted",
+    "cross_sell_propensity",
+    "cross_sell_propensity_source",
+    "recommended_cross_sell_category",
+    "cross_sell_category_confidence",
+    "promotion_model_accepted",
+    "promotion_response_propensity",
+    "promotion_propensity_source",
+    "recommended_campaign_channel",
+    "recommended_discount_depth",
+    "recommended_offer_category",
+    "promotion_response_band",
     "expected_incremental_sales",
     "expected_incremental_margin",
     "primary_driver",
@@ -1222,10 +1501,10 @@ st.caption(
 st.divider()
 
 st.caption(
-    "Next Best Action is a transparent decision engine rather than a "
-    "black-box model. Candidate actions are gated by customer value, "
-    "lifecycle, behavioural risk, category opportunity and promotion "
-    "responsiveness. Interventions must also clear a positive expected "
-    "incremental margin hurdle; otherwise Do Nothing remains a valid "
-    "commercial decision."
+    "Next Best Action uses a governed hybrid decision architecture. "
+    "Governance-accepted propensity models can inform action relevance and "
+    "response probability, while rejected models automatically fall back to "
+    "transparent decision rules. Customer eligibility and positive expected "
+    "incremental margin remain mandatory; otherwise Do Nothing remains a "
+    "valid commercial decision."
 )

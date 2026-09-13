@@ -11,14 +11,18 @@ CUSTOMER_LTV_FILE = RUNTIME_DIR / "customer_ltv.parquet"
 COHORT_RETENTION_FILE = RUNTIME_DIR / "cohort_retention.parquet"
 COHORT_SUMMARY_FILE = RUNTIME_DIR / "cohort_summary.parquet"
 CUSTOMER_GROWTH_MONTHLY_FILE = RUNTIME_DIR / "customer_growth_monthly.parquet"
-TRANSACTION_FILE = GENERATED_DIR / "transactions.parquet"
+TRANSACTION_FILE = RUNTIME_DIR / "golden_customer_transactions.parquet"
+GOLDEN_MASTER_FILE = RUNTIME_DIR / "golden_customer_master.parquet"
 
 
 def test_customer_ltv_reconciles_to_transactions():
     ltv = pd.read_parquet(CUSTOMER_LTV_FILE)
     transactions = pd.read_parquet(TRANSACTION_FILE)
+    golden_master = pd.read_parquet(GOLDEN_MASTER_FILE)
 
-    assert len(ltv) == 20_000
+    assert len(ltv) == len(golden_master)
+    assert ltv["golden_customer_id"].is_unique
+    assert set(ltv["golden_customer_id"]) == set(golden_master["golden_customer_id"])
 
     assert np.isclose(
         ltv["observed_ltv_sales"].sum(),

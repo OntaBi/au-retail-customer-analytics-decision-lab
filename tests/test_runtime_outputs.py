@@ -24,6 +24,15 @@ CLUSTER_FILE = (
 )
 
 
+GOLDEN_MASTER_FILE = (
+    PROJECT_ROOT / "data" / "runtime" / "golden_customer_master.parquet"
+)
+
+GOLDEN_TRANSACTION_FILE = (
+    PROJECT_ROOT / "data" / "runtime" / "golden_customer_transactions.parquet"
+)
+
+
 VALID_CLUSTER_NAMES = {
     "Big Ticket Shoppers",
     "High Frequency Generalists",
@@ -51,18 +60,12 @@ def test_customer_priority_has_unique_customer_records():
         PRIORITY_FILE
     )
 
-    assert len(priority) == 20_000
+    golden_master = pd.read_parquet(GOLDEN_MASTER_FILE)
 
-    assert (
-        priority["customer_id"]
-        .nunique()
-        == 20_000
-    )
-
-    assert not (
-        priority["customer_id"]
-        .duplicated()
-        .any()
+    assert len(priority) == len(golden_master)
+    assert priority["golden_customer_id"].is_unique
+    assert set(priority["golden_customer_id"]) == set(
+        golden_master["golden_customer_id"]
     )
 
 
@@ -72,11 +75,29 @@ def test_cluster_outputs_use_valid_final_segments():
         CLUSTER_FILE
     )
 
+    clustering_features = pd.read_parquet(
+        PROJECT_ROOT
+        / "data"
+        / "runtime"
+        / "clustering_features.parquet"
+    )
+
     assert not clusters.empty
 
-    assert (
-        clusters["customer_id"]
-        .is_unique
+    assert clusters[
+        "golden_customer_id"
+    ].is_unique
+
+    assert clustering_features[
+        "golden_customer_id"
+    ].is_unique
+
+    assert set(
+        clusters["golden_customer_id"]
+    ) == set(
+        clustering_features[
+            "golden_customer_id"
+        ]
     )
 
     assert set(

@@ -11,6 +11,14 @@ CUSTOMER_MASTER_FILE = Path(
     "data/generated/customer_master.parquet"
 )
 
+IDENTITY_GROUND_TRUTH_FILE = Path(
+    "data/generated/identity_ground_truth.parquet"
+)
+
+IDENTITY_RESOLUTION_FILE = Path(
+    "data/runtime/customer_identity_resolution.parquet"
+)
+
 TREND_FILE = Path(
     "data/runtime/customer_cadence_trend.parquet"
 )
@@ -25,24 +33,90 @@ PROFILE_FILE = OUTPUT_DIR / "cadence_trend_profile.csv"
 # Validation data
 # ---------------------------------------------------------------------
 
-def build_validation_data(
+
+def build_golden_truth_bridge(
     customer_master: pd.DataFrame,
-    cadence_trend: pd.DataFrame,
+    identity_ground_truth: pd.DataFrame,
+    identity_resolution: pd.DataFrame,
 ) -> pd.DataFrame:
+    """
+    QA-only bridge from resolved golden identities back to hidden
+    synthetic truth. Production analytics never consume this bridge.
+
+    Only uncontaminated resolved clusters are used for behavioural
+    truth validation. This prevents a known false merge from being
+    assigned an arbitrary synthetic archetype/persona.
+    """
+    record_truth = (
+        identity_resolution[
+            ["identity_record_id", "golden_customer_id"]
+        ]
+        .merge(
+            identity_ground_truth[
+                ["identity_record_id", "golden_customer_id"]
+            ].rename(
+                columns={
+                    "golden_customer_id": "customer_id"
+                }
+            ),
+            on="identity_record_id",
+            how="left",
+            validate="one_to_one",
+        )
+    )
+
+    cluster_truth = (
+        record_truth
+        .groupby("golden_customer_id")
+        .agg(
+            true_people=("customer_id", "nunique"),
+            customer_id=("customer_id", "first"),
+        )
+        .reset_index()
+    )
+
+    clean = cluster_truth.loc[
+        cluster_truth["true_people"].eq(1)
+    ].copy()
 
     truth = customer_master[
         [
             "customer_id",
-            "archetype",
+            "archetype"
         ]
     ].copy()
 
+    return (
+        clean
+        .merge(
+            truth,
+            on="customer_id",
+            how="left",
+            validate="many_to_one",
+        )
+        .drop(columns=["customer_id", "true_people"])
+    )
+
+def build_validation_data(
+    customer_master: pd.DataFrame,
+    identity_ground_truth: pd.DataFrame,
+    identity_resolution: pd.DataFrame,
+    cadence_trend: pd.DataFrame,
+) -> pd.DataFrame:
+
+    truth = build_golden_truth_bridge(
+        customer_master,
+        identity_ground_truth,
+        identity_resolution,
+    )
+
     return truth.merge(
         cadence_trend,
-        on="customer_id",
+        on="golden_customer_id",
         how="left",
         validate="one_to_one",
     )
+
 
 
 # ---------------------------------------------------------------------
@@ -82,7 +156,7 @@ def build_profile(
         sufficient
         .groupby("archetype")
         .agg(
-            customers=("customer_id", "nunique"),
+            customers=("golden_customer_id", "nunique"),
             median_gap_count=(
                 "trend_gap_count",
                 "median",
@@ -162,7 +236,7 @@ def build_detection_summary(
         result
         .groupby("archetype")
         .agg(
-            customers=("customer_id", "nunique"),
+            customers=("golden_customer_id", "nunique"),
             sufficient_history_rate=(
                 "sufficient_history",
                 "mean",
@@ -188,7 +262,7 @@ def build_detection_summary(
         .groupby("archetype")
         .agg(
             sufficient_customers=(
-                "customer_id",
+                "golden_customer_id",
                 "nunique",
             ),
             sufficient_deterioration_rate=(
@@ -242,7 +316,7 @@ def print_results(
 
     print(
         f"Customers validated: "
-        f"{validation['customer_id'].nunique():,}"
+        f"{validation['golden_customer_id'].nunique():,}"
     )
 
     print("\nCADENCE TREND STATUS BY TRUE ARCHETYPE (%)")
@@ -282,12 +356,22 @@ def main() -> None:
         CUSTOMER_MASTER_FILE
     )
 
+    identity_ground_truth = pd.read_parquet(
+        IDENTITY_GROUND_TRUTH_FILE
+    )
+
+    identity_resolution = pd.read_parquet(
+        IDENTITY_RESOLUTION_FILE
+    )
+
     cadence_trend = pd.read_parquet(
         TREND_FILE
     )
 
     validation = build_validation_data(
         customer_master,
+        identity_ground_truth,
+        identity_resolution,
         cadence_trend,
     )
 

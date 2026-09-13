@@ -7,6 +7,10 @@ NBA_FILE = Path(
     "data/runtime/customer_next_best_action.parquet"
 )
 
+GOLDEN_MASTER_FILE = Path(
+    "data/runtime/golden_customer_master.parquet"
+)
+
 VALID_ACTIONS = {
     "Protect",
     "Re-engage",
@@ -19,10 +23,11 @@ VALID_ACTIONS = {
 
 def test_nba_has_one_recommendation_per_customer():
     nba = pd.read_parquet(NBA_FILE)
+    golden_master = pd.read_parquet(GOLDEN_MASTER_FILE)
 
-    assert len(nba) == 20_000
-    assert nba["customer_id"].nunique() == 20_000
-    assert not nba["customer_id"].duplicated().any()
+    assert len(nba) == len(golden_master)
+    assert nba["golden_customer_id"].is_unique
+    assert set(nba["golden_customer_id"]) == set(golden_master["golden_customer_id"])
 
 
 def test_nba_action_taxonomy_and_bounds_are_valid():
